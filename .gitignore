@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+
+# Local business data and evidence
+data/*
+!data/.gitkeep
+
+# Playwright state can impersonate the signed-in account
+playwright/.auth/
+test-results/
+playwright-report/
+
+*.log
+.DS_Store
+Thumbs.db

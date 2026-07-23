@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>HR Auto — ศูนย์ควบคุมโพสต์งาน</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">H</div>
+          <div>
+            <strong>HR Auto</strong>
+            <span>Posting workspace</span>
+          </div>
+        </div>
+
+        <nav class="main-nav" aria-label="เมนูหลัก">
+          <button class="nav-item is-active" data-route="dashboard">
+            <span class="nav-icon">⌂</span><span>ภาพรวมวันนี้</span>
+          </button>
+          <button class="nav-item" data-route="compose">
+            <span class="nav-icon">＋</span><span>สร้างโพสต์</span>
+          </button>
+          <button class="nav-item" data-route="groups">
+            <span class="nav-icon">◎</span><span>คลังกลุ่ม</span>
+          </button>
+          <button class="nav-item" data-route="runs">
+            <span class="nav-icon">▶</span><span>คิวและการทำงาน</span>
+          </button>
+          <button class="nav-item" data-route="history">
+            <span class="nav-icon">▤</span><span>หลักฐาน</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="privacy-note">
+            <span class="privacy-dot"></span>
+            <div>
+              <strong>ข้อมูลอยู่ในเครื่อง</strong>
+              <span>ไม่ส่ง session ขึ้น cloud</span>
+            </div>
+          </div>
+          <button class="nav-item" data-route="settings">
+            <span class="nav-icon">⚙</span><span>ตั้งค่าและ Session</span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="pageEyebrow">ศูนย์ควบคุม</p>
+            <h1 id="pageTitle">ภาพรวมวันนี้</h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="session-pill" id="sessionPill">
+              <span class="status-dot"></span>
+              <span>กำลังตรวจ Session</span>
+            </div>
+            <button class="button button-primary" data-action="new-draft">สร้างโพสต์ใหม่</button>
+          </div>
+        </header>
+
+        <div id="app" class="page-content" aria-live="polite">
+          <div class="loading-state">
+            <span class="spinner"></span>
+            <p>กำลังเตรียมพื้นที่ทำงาน…</p>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+
+    <dialog id="groupDialog" class="modal">
+      <form method="dialog" class="modal-card" id="groupForm">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Group library</p>
+            <h2>เพิ่มกลุ่ม Facebook</h2>
+          </div>
+          <button type="button" class="icon-button" data-action="close-group" aria-label="ปิด">×</button>
+        </div>
+        <div class="form-grid">
+          <label class="field field-wide">
+            <span>ชื่อกลุ่ม</span>
+            <input name="name" required placeholder="เช่น หางานกรุงเทพมหานคร" />
+          </label>
+          <label class="field field-wide">
+            <span>Facebook Group URL</span>
+            <input name="url" required type="url" placeholder="https://www.facebook.com/groups/..." />
+          </label>
+          <label class="field">
+            <span>จังหวัด/พื้นที่</span>
+            <input name="province" placeholder="กรุงเทพฯ" />
+          </label>
+          <label class="field">
+            <span>สถานะการโพสต์</span>
+            <select name="canPost">
+              <option value="unknown">ยังไม่ตรวจสอบ</option>
+              <option value="yes">โพสต์ได้</option>
+              <option value="no">โพสต์ไม่ได้</option>
+            </select>
+          </label>
+          <label class="field field-wide">
+            <span>แท็ก คั่นด้วยเครื่องหมาย |</span>
+            <input name="tags" placeholder="งานทั่วไป | กรุงเทพฯ | รายวัน" />
+          </label>
+          <label class="field field-wide">
+            <span>หมายเหตุ/กฎกลุ่ม</span>
+            <textarea name="note" rows="3" placeholder="เช่น ห้ามโพสต์ซ้ำภายใน 7 วัน"></textarea>
+          </label>
+          <label class="check-field field-wide">
+            <input type="checkbox" name="requiresApproval" />
+            <span>โพสต์ในกลุ่มนี้ต้องรอแอดมินอนุมัติ</span>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="button button-ghost" data-action="close-group">ยกเลิก</button>
+          <button class="button button-primary" value="default" type="submit">บันทึกกลุ่ม</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="scanDialog" class="modal scan-modal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">One-time collection</p>
+            <h2>Automatic Group Scan</h2>
+          </div>
+          <button class="icon-button" data-action="close-scan" aria-label="ปิด">×</button>
+        </div>
+        <div id="scanDialogContent"></div>
+      </div>
+    </dialog>
+
+    <dialog id="evidenceDialog" class="modal evidence-modal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Evidence manager</p>
+            <h2>จัดการหลักฐาน</h2>
+          </div>
+          <button type="button" class="icon-button" data-action="close-evidence" aria-label="ปิด">×</button>
+        </div>
+        <div id="evidenceDialogContent"></div>
+      </div>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
