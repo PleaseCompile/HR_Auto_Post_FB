@@ -12,6 +12,7 @@ const {
   deleteRun,
   getDraft,
   getRun,
+  restartDraftRun,
   updateTarget,
   upsertGroup,
 } = await import("../dist/db.js");
@@ -97,6 +98,66 @@ try {
   });
   if (!replacementRun || replacementRun.targets.length !== 2) {
     throw new Error("Deleted queue targets still blocked a full replacement run");
+  }
+
+  const restartDraft = createDraft({
+    workDate: "2026-07-25",
+    slot: "morning",
+    text: "Restart all queues smoke test",
+  });
+  const firstOldRun = createRun({
+    draftId: restartDraft.id,
+    groupIds: [protectedGroup.id],
+    mode: "assisted",
+  });
+  updateTarget(firstOldRun.targets[0].id, "published", {
+    message: "Published before full restart",
+  });
+  const secondOldRun = createRun({
+    draftId: restartDraft.id,
+    groupIds: [uncertainGroup.id],
+    mode: "assisted",
+  });
+  updateTarget(secondOldRun.targets[0].id, "manual_action_required", {
+    message: "Uncertain before full restart",
+  });
+  let fullRestartRejected = false;
+  try {
+    restartDraftRun(
+      {
+        draftId: restartDraft.id,
+        groupIds: [protectedGroup.id, uncertainGroup.id],
+        mode: "assisted",
+      },
+      { acknowledgedUncertain: true },
+    );
+  } catch (error) {
+    fullRestartRejected = String(error).includes("ความเสี่ยงโพสต์ซ้ำ");
+  }
+  if (!fullRestartRejected || !getRun(firstOldRun.id) || !getRun(secondOldRun.id)) {
+    throw new Error("Full Draft restart did not require complete acknowledgement");
+  }
+  const restarted = restartDraftRun(
+    {
+      draftId: restartDraft.id,
+      groupIds: [protectedGroup.id, uncertainGroup.id],
+      mode: "assisted",
+      workflow: "hybrid-tabs",
+      tabLimit: 0,
+    },
+    {
+      acknowledgedPosted: true,
+      acknowledgedUncertain: true,
+    },
+  );
+  if (
+    restarted.deletedRunCount !== 2 ||
+    restarted.deletedTargetCount !== 2 ||
+    getRun(firstOldRun.id) ||
+    getRun(secondOldRun.id) ||
+    restarted.run.targets.length !== 2
+  ) {
+    throw new Error("Full Draft restart did not atomically replace all old queues");
   }
 
   console.log("Run deletion safety test passed");

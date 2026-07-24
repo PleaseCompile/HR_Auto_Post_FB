@@ -23,6 +23,7 @@ import {
   listGroups,
   listManualEvidence,
   listRuns,
+  restartDraftRun,
   updateDraft,
   updateManualEvidence,
   updateRunWorkflow,
@@ -143,6 +144,21 @@ function publicManualEvidence(evidence: ReturnType<typeof getManualEvidence>) {
     ...safeEvidence,
     url: `/api/manual-evidence/${evidence.id}/file`,
   };
+}
+
+function deleteEvidenceFiles(storedPaths: string[]): number {
+  const safeRoots = [evidenceDirectory, manualEvidenceDirectory].map(
+    (directory) => `${path.resolve(directory)}${path.sep}`,
+  );
+  let deleted = 0;
+  for (const storedPath of storedPaths) {
+    const resolved = path.resolve(storedPath);
+    if (safeRoots.some((root) => resolved.startsWith(root)) && fs.existsSync(resolved)) {
+      fs.unlinkSync(resolved);
+      deleted += 1;
+    }
+  }
+  return deleted;
 }
 
 app.get("/api/health", (_request, response) => {
@@ -333,15 +349,7 @@ app.delete("/api/runs/:id", (request, response) => {
   const deleted = deleteRun(runId, input);
   if (!deleted) return response.status(404).json({ error: "ไม่พบคิวงาน" });
 
-  let deletedEvidenceFiles = 0;
-  const safeRoot = `${path.resolve(evidenceDirectory)}${path.sep}`;
-  for (const storedPath of deleted.evidencePaths) {
-    const resolved = path.resolve(storedPath);
-    if (resolved.startsWith(safeRoot) && fs.existsSync(resolved)) {
-      fs.unlinkSync(resolved);
-      deletedEvidenceFiles += 1;
-    }
-  }
+  const deletedEvidenceFiles = deleteEvidenceFiles(deleted.evidencePaths);
   response.json({
     ok: true,
     runId: deleted.runId,
@@ -362,6 +370,50 @@ app.post("/api/runs", (request, response) => {
     .parse(request.body);
   if (!getDraft(input.draftId)) return response.status(404).json({ error: "ไม่พบ Draft" });
   response.status(201).json(createRun(input));
+});
+
+app.post("/api/runs/restart-draft", (request, response) => {
+  const input = z
+    .object({
+      draftId: z.string().uuid(),
+      groupIds: z.array(z.string().uuid()).min(1).max(250),
+      mode: z.enum(["assisted", "dry-run"]),
+      workflow: z.enum(["sequential", "hybrid-tabs"]).optional(),
+      tabLimit: z.number().int().min(0).max(250).optional(),
+      acknowledgedUncertain: z.boolean(),
+      acknowledgedPosted: z.boolean(),
+    })
+    .parse(request.body);
+  if (!getDraft(input.draftId)) {
+    return response.status(404).json({ error: "ไม่พบ Draft" });
+  }
+  if (runManager.isBusy()) {
+    return response.status(409).json({
+      error: "ยังมีคิวกำลังทำงาน กรุณาหยุดคิวและรอให้แท็บ Facebook ปิดครบก่อนเริ่มใหม่ทั้งหมด",
+    });
+  }
+  const restarted = restartDraftRun(
+    {
+      draftId: input.draftId,
+      groupIds: input.groupIds,
+      mode: input.mode,
+      workflow: input.workflow,
+      tabLimit: input.tabLimit,
+    },
+    {
+      acknowledgedUncertain: input.acknowledgedUncertain,
+      acknowledgedPosted: input.acknowledgedPosted,
+    },
+  );
+  const deletedEvidenceFiles = deleteEvidenceFiles(restarted.evidencePaths);
+  response.status(201).json({
+    ...restarted.run,
+    reset: {
+      deletedRunCount: restarted.deletedRunCount,
+      deletedTargetCount: restarted.deletedTargetCount,
+      deletedEvidenceFiles,
+    },
+  });
 });
 
 app.post("/api/runs/:id/start", (request, response) => {

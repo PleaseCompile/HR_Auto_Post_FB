@@ -580,13 +580,51 @@ export function getLatestGroupScanRun(): GroupScanState | null {
   return row ? rowToGroupScan(row) : null;
 }
 
-export function createRun(input: {
+type RunCreationInput = {
   draftId: string;
   groupIds: string[];
   mode: RunMode;
   workflow?: RunWorkflow;
   tabLimit?: number;
-}): RunRecord {
+};
+
+type RunDeletionOptions = {
+  acknowledgedUncertain?: boolean;
+  acknowledgedPosted?: boolean;
+};
+
+function insertRun(input: RunCreationInput): RunRecord {
+  const uniqueGroupIds = [...new Set(input.groupIds)];
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const workflow = input.mode === "dry-run" ? "sequential" : input.workflow || "sequential";
+  const tabLimit =
+    input.tabLimit === undefined || input.tabLimit === 0
+      ? 0
+      : Math.max(1, Math.round(input.tabLimit));
+  const insertRunStatement = db.prepare(
+    `INSERT INTO runs(id, draft_id, mode, workflow, tab_limit, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'queued', ?)`,
+  );
+  const insertTargetStatement = db.prepare(
+    `INSERT INTO run_targets(id, run_id, group_id, position, status, updated_at)
+     VALUES (?, ?, ?, ?, 'queued', ?)`,
+  );
+  const executeInsert = () => {
+    insertRunStatement.run(id, input.draftId, input.mode, workflow, tabLimit, now);
+    uniqueGroupIds.forEach((groupId, position) => {
+      insertTargetStatement.run(randomUUID(), id, groupId, position, now);
+    });
+  };
+  if (db.inTransaction) {
+    executeInsert();
+  } else {
+    db.transaction(executeInsert)();
+  }
+  return getRun(id)!;
+}
+
+export function createRun(input: RunCreationInput): RunRecord {
   const uniqueGroupIds = [...new Set(input.groupIds)];
   if (input.mode === "assisted" && uniqueGroupIds.length) {
     const placeholders = uniqueGroupIds.map(() => "?").join(", ");
@@ -609,33 +647,11 @@ export function createRun(input: {
       throw new Error(
         `Draft นี้อาจถูกส่งไปแล้ว ${previous.length} กลุ่ม (${names}${
           previous.length > 3 ? "…" : ""
-        }) กรุณาสร้าง Draft ใหม่หากต้องการโพสต์ซ้ำ`,
+        }) กรุณาใช้ “ล้างคิวเดิมทั้งหมดและสร้างใหม่” หากตรวจสอบแล้วว่าต้องเริ่มรอบใหม่`,
       );
     }
   }
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const workflow = input.mode === "dry-run" ? "sequential" : input.workflow || "sequential";
-  const tabLimit =
-    input.tabLimit === undefined || input.tabLimit === 0
-      ? 0
-      : Math.max(1, Math.round(input.tabLimit));
-  const insertRun = db.prepare(
-    `INSERT INTO runs(id, draft_id, mode, workflow, tab_limit, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'queued', ?)`,
-  );
-  const insertTarget = db.prepare(
-    `INSERT INTO run_targets(id, run_id, group_id, position, status, updated_at)
-     VALUES (?, ?, ?, ?, 'queued', ?)`,
-  );
-  const transaction = db.transaction(() => {
-    insertRun.run(id, input.draftId, input.mode, workflow, tabLimit, now);
-    uniqueGroupIds.forEach((groupId, position) => {
-      insertTarget.run(randomUUID(), id, groupId, position, now);
-    });
-  });
-  transaction();
-  return getRun(id)!;
+  return insertRun(input);
 }
 
 export function listRuns(limit = 100): RunRecord[] {
@@ -651,10 +667,7 @@ export function getRun(id: string): RunRecord | null {
 
 export function deleteRun(
   id: string,
-  options: {
-    acknowledgedUncertain?: boolean;
-    acknowledgedPosted?: boolean;
-  } = {},
+  options: RunDeletionOptions = {},
 ): { runId: string; targetCount: number; evidencePaths: string[] } | null {
   const run = getRun(id);
   if (!run) return null;
@@ -705,6 +718,83 @@ export function deleteRun(
   return {
     runId: id,
     targetCount: targets.length,
+    evidencePaths: [...evidencePaths],
+  };
+}
+
+export function restartDraftRun(
+  input: RunCreationInput,
+  options: RunDeletionOptions = {},
+): {
+  run: RunRecord;
+  deletedRunCount: number;
+  deletedTargetCount: number;
+  evidencePaths: string[];
+} {
+  const existingRuns = (
+    db.prepare("SELECT * FROM runs WHERE draft_id = ? ORDER BY created_at").all(input.draftId) as any[]
+  ).map((row) => rowToRun(row, true));
+  const activeRuns = existingRuns.filter((run) =>
+    ["running", "awaiting_confirmation", "paused"].includes(run.status),
+  );
+  if (activeRuns.length) {
+    throw new Error(
+      `ยังมี ${activeRuns.length} คิวของ Draft นี้กำลังทำงาน กรุณาหยุดคิวและรอให้แท็บ Facebook ปิดครบก่อนเริ่มใหม่ทั้งหมด`,
+    );
+  }
+
+  const targets = existingRuns.flatMap((run) => run.targets || []);
+  const submittingTargets = targets.filter((target) => target.status === "submitting");
+  if (submittingTargets.length) {
+    throw new Error(
+      `เริ่มใหม่ทั้งหมดไม่ได้ เพราะมี ${submittingTargets.length} รายการที่กำลังส่ง กรุณารอและตรวจ Facebook ก่อน`,
+    );
+  }
+  const postedTargets = targets.filter((target) =>
+    ["published", "pending_review"].includes(target.status),
+  );
+  if (postedTargets.length && !options.acknowledgedPosted) {
+    throw new Error(
+      `Draft นี้มี ${postedTargets.length} รายการที่เผยแพร่หรือรอแอดมิน กรุณายืนยันความเสี่ยงโพสต์ซ้ำก่อนเริ่มใหม่ทั้งหมด`,
+    );
+  }
+  const uncertainTargets = targets.filter(
+    (target) => target.status === "manual_action_required",
+  );
+  if (uncertainTargets.length && !options.acknowledgedUncertain) {
+    throw new Error(
+      `Draft นี้มี ${uncertainTargets.length} รายการที่ต้องตรวจด้วยตนเอง กรุณาตรวจ Facebook และยืนยันก่อนเริ่มใหม่ทั้งหมด`,
+    );
+  }
+
+  const evidencePaths = new Set<string>();
+  targets.forEach((target) => {
+    if (target.evidencePath) evidencePaths.add(target.evidencePath);
+  });
+  if (existingRuns.length) {
+    const placeholders = existingRuns.map(() => "?").join(", ");
+    const manualPaths = db
+      .prepare(
+        `SELECT me.stored_path
+         FROM manual_evidence me
+         JOIN run_targets rt ON rt.id = me.target_id
+         WHERE rt.run_id IN (${placeholders})`,
+      )
+      .all(...existingRuns.map((run) => run.id)) as Array<{ stored_path: string }>;
+    manualPaths.forEach((item) => evidencePaths.add(item.stored_path));
+  }
+
+  let run: RunRecord | null = null;
+  const transaction = db.transaction(() => {
+    db.prepare("DELETE FROM runs WHERE draft_id = ?").run(input.draftId);
+    run = insertRun(input);
+  });
+  transaction();
+
+  return {
+    run: run!,
+    deletedRunCount: existingRuns.length,
+    deletedTargetCount: targets.length,
     evidencePaths: [...evidencePaths],
   };
 }

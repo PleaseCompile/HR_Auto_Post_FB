@@ -636,6 +636,9 @@ function renderGroups() {
                 <option value="20">สูงสุด 20 แท็บ</option>
               </select>
               <button class="button button-primary" data-action="create-run">สร้างคิวโพสต์</button>
+              <button class="button button-danger" data-action="restart-draft-run" title="ลบทุกคิวเดิมของ Draft ที่เลือก แล้วสร้างคิวใหม่จากกลุ่มที่เลือกอยู่">
+                ล้างคิวเดิมทั้งหมดและสร้างใหม่
+              </button>
               <button class="button button-ghost" data-action="clear-selection">ล้างที่เลือก</button>
             </div>
           </div>
@@ -1784,6 +1787,46 @@ async function handleAction(button) {
         mode === "assisted"
           ? "สร้างคิวโพสต์จริงแล้ว กดเริ่มคิวเพื่อเตรียมโพสต์และยืนยันทีละกลุ่ม"
           : "สร้าง Dry run แล้ว โหมดนี้ตรวจกลุ่มเท่านั้นและจะไม่โพสต์",
+      );
+      navigate("runs");
+    } else if (action === "restart-draft-run") {
+      const draftSelect = document.querySelector("#runDraft");
+      const draftId = draftSelect?.value;
+      const mode = document.querySelector("#runMode")?.value;
+      const workflow =
+        mode === "dry-run"
+          ? "sequential"
+          : document.querySelector("#runWorkflow")?.value || "hybrid-tabs";
+      const tabLimitValue = document.querySelector("#runTabLimit")?.value;
+      const tabLimit = tabLimitValue === "0" ? 0 : Number(tabLimitValue || 3);
+      if (!draftId) throw new Error("กรุณาเลือก Draft");
+      const draftLabel =
+        draftSelect?.selectedOptions?.[0]?.textContent?.trim() || "Draft ที่เลือก";
+      const typed = window.prompt(
+        `เริ่มใหม่ทั้งหมดสำหรับ ${draftLabel}\n\nระบบจะลบ “ทุกคิวเดิม” ที่อ้าง Draft นี้ รวมสถานะไม่สำเร็จ ต้องตรวจ เผยแพร่แล้ว และหลักฐานของคิว จากนั้นสร้างคิวใหม่ด้วย ${state.selectedGroups.size.toLocaleString("th-TH")} กลุ่มที่เลือกอยู่\n\nDraft ข้อความ รูปต้นฉบับ และคลังกลุ่มจะไม่ถูกลบ แต่มีความเสี่ยงโพสต์ซ้ำหากรายการเดิมเคยถูกส่งจริง\n\nหากตรวจ Facebook แล้วและต้องการทำต่อ ให้พิมพ์: เริ่มใหม่ทั้งหมด`,
+        "",
+      );
+      if (typed === null) return;
+      if (typed.trim() !== "เริ่มใหม่ทั้งหมด") {
+        toast("ยกเลิกการเริ่มใหม่ เพราะคำยืนยันไม่ถูกต้อง", "error");
+        return;
+      }
+      const restarted = await api("/api/runs/restart-draft", {
+        method: "POST",
+        body: JSON.stringify({
+          draftId,
+          mode,
+          workflow,
+          tabLimit,
+          groupIds: [...state.selectedGroups],
+          acknowledgedUncertain: true,
+          acknowledgedPosted: true,
+        }),
+      });
+      state.selectedGroups.clear();
+      await refreshAll();
+      toast(
+        `ล้างคิวเดิม ${restarted.reset?.deletedRunCount || 0} คิวแล้ว และสร้างคิวใหม่ ${restarted.targets?.length || 0} กลุ่มสำเร็จ`,
       );
       navigate("runs");
     } else if (action === "clone-assisted-run") {

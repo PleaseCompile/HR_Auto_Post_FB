@@ -71,6 +71,14 @@ try {
       text: "Seed draft for button audit",
     }),
   });
+  const restartDraft = await request("/api/drafts", {
+    method: "POST",
+    body: JSON.stringify({
+      workDate: todayBangkok,
+      slot: "evening",
+      text: "Restart Draft for button audit",
+    }),
+  });
   const seedGroup = await request("/api/groups", {
     method: "POST",
     body: JSON.stringify({
@@ -257,6 +265,17 @@ try {
     if (await page.locator(".group-check:checked").count()) {
       throw new Error("Clear selection left checked groups");
     }
+  });
+  await check("Groups: clear old Draft queues and restart", async () => {
+    await page.locator(".group-check").first().check();
+    await page.locator("#runDraft").selectOption(restartDraft.id);
+    page.once("dialog", (dialog) => dialog.accept("เริ่มใหม่ทั้งหมด"));
+    await page
+      .getByRole("button", { name: "ล้างคิวเดิมทั้งหมดและสร้างใหม่" })
+      .click();
+    await page.getByRole("heading", { name: "คิวและการทำงาน" }).waitFor();
+    await page.getByText(/ล้างคิวเดิม 0 คิวแล้ว และสร้างคิวใหม่ 1 กลุ่มสำเร็จ/).waitFor();
+    await navigate("groups", "คลังกลุ่ม");
   });
   await check("Groups: create queue", async () => {
     await page.locator(".group-check").nth(1).check();
