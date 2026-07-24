@@ -491,6 +491,7 @@ try {
   ];
   let clonedAssistedPayload = null;
   let deletedRunPayload = null;
+  let deletedPostedRunPayload = null;
   await page.route(`${baseUrl}/api/runs`, async (route) => {
     if (route.request().method() === "GET") {
       await route.fulfill({ json: mockedRuns });
@@ -525,6 +526,16 @@ try {
       mockedRuns[0].targets[2].status = "published";
     }
     await route.fulfill({ json: { ok: true } });
+  });
+  await page.route(`${baseUrl}/api/runs/mock-recovery-run`, async (route) => {
+    if (route.request().method() === "DELETE") {
+      deletedPostedRunPayload = route.request().postDataJSON();
+      const index = mockedRuns.findIndex((run) => run.id === "mock-recovery-run");
+      if (index >= 0) mockedRuns.splice(index, 1);
+      await route.fulfill({ json: { ok: true, runId: "mock-recovery-run" } });
+      return;
+    }
+    await route.continue();
   });
   await page.route(`${baseUrl}/api/runs/mock-recovery-run/**`, async (route) => {
     const url = route.request().url();
@@ -734,18 +745,40 @@ try {
     }
   });
   await navigate("runs", "คิวและการทำงาน");
-  await check("Runs: delete unsuccessful queue", async () => {
+  await check("Runs: delete entire failed queue", async () => {
     page.once("dialog", (dialog) => dialog.accept());
     await page
       .locator(".run-card")
       .filter({ hasText: "Composer was not ready" })
-      .getByRole("button", { name: "ลบคิวที่ไม่สำเร็จ" })
+      .getByRole("button", { name: "ลบทั้งคิว" })
       .click();
     await page
-      .getByText("ลบคิวที่ไม่สำเร็จแล้ว สามารถเลือกกลุ่มทั้งหมดและสร้างคิวโพสต์ใหม่ได้")
+      .getByText("ลบทั้งคิวแล้ว สามารถเลือกกลุ่มเดิมทั้งหมดและสร้างคิวโพสต์ใหม่ได้")
       .waitFor();
     if (!deletedRunPayload || mockedRuns.some((run) => run.id === "mock-failed-run")) {
-      throw new Error("Unsuccessful run was not deleted through the UI");
+      throw new Error("Failed run was not deleted through the UI");
+    }
+  });
+  await check("Runs: require typed confirmation before deleting posted queue", async () => {
+    page.once("dialog", (dialog) => dialog.accept("ลบทั้งคิว"));
+    await page
+      .locator(".run-card")
+      .filter({ hasText: "Recovery mock group" })
+      .getByRole("button", { name: "ลบทั้งคิว" })
+      .click();
+    for (let attempt = 0; attempt < 30 && !deletedPostedRunPayload; attempt += 1) {
+      await page.waitForTimeout(100);
+    }
+    if (
+      !deletedPostedRunPayload?.acknowledgedPosted ||
+      mockedRuns.some((run) => run.id === "mock-recovery-run")
+    ) {
+      throw new Error(
+        `Posted queue was not deleted after typed acknowledgement: ${JSON.stringify({
+          deletedPostedRunPayload,
+          recoveryStillPresent: mockedRuns.some((run) => run.id === "mock-recovery-run"),
+        })}`,
+      );
     }
   });
 

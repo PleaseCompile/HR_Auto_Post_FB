@@ -11,7 +11,7 @@ import {
   createDraft,
   createRun,
   dashboardSummary,
-  deleteUnsuccessfulRun,
+  deleteRun,
   deleteManualEvidence,
   deleteMedia,
   getDraft,
@@ -327,9 +327,10 @@ app.delete("/api/runs/:id", (request, response) => {
   const input = z
     .object({
       acknowledgedUncertain: z.boolean().optional().default(false),
+      acknowledgedPosted: z.boolean().optional().default(false),
     })
     .parse(request.body || {});
-  const deleted = deleteUnsuccessfulRun(runId, input);
+  const deleted = deleteRun(runId, input);
   if (!deleted) return response.status(404).json({ error: "ไม่พบคิวงาน" });
 
   let deletedEvidenceFiles = 0;

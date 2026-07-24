@@ -649,9 +649,12 @@ export function getRun(id: string): RunRecord | null {
   return row ? rowToRun(row, true) : null;
 }
 
-export function deleteUnsuccessfulRun(
+export function deleteRun(
   id: string,
-  options: { acknowledgedUncertain?: boolean } = {},
+  options: {
+    acknowledgedUncertain?: boolean;
+    acknowledgedPosted?: boolean;
+  } = {},
 ): { runId: string; targetCount: number; evidencePaths: string[] } | null {
   const run = getRun(id);
   if (!run) return null;
@@ -659,12 +662,20 @@ export function deleteUnsuccessfulRun(
     throw new Error("กรุณาหยุดคิวและรอให้แท็บ Facebook ปิดครบก่อนลบ");
   }
   const targets = run.targets || [];
-  const protectedTargets = targets.filter((target) =>
-    ["published", "pending_review", "submitting"].includes(target.status),
+  const submittingTargets = targets.filter(
+    (target) => target.status === "submitting",
   );
-  if (protectedTargets.length) {
+  if (submittingTargets.length) {
     throw new Error(
-      `ลบคิวนี้ไม่ได้ เพราะมี ${protectedTargets.length} รายการที่เผยแพร่ รออนุมัติ หรือกำลังส่ง`,
+      `ลบคิวนี้ไม่ได้ เพราะมี ${submittingTargets.length} รายการที่กำลังส่ง กรุณารอหรือหยุดและตรวจ Facebook ก่อน`,
+    );
+  }
+  const postedTargets = targets.filter((target) =>
+    ["published", "pending_review"].includes(target.status),
+  );
+  if (postedTargets.length && !options.acknowledgedPosted) {
+    throw new Error(
+      `คิวนี้มี ${postedTargets.length} รายการที่เผยแพร่หรือรอแอดมิน กรุณายืนยันว่าต้องการลบประวัติทั้งคิวและยอมรับความเสี่ยงโพสต์ซ้ำ`,
     );
   }
   const uncertainTargets = targets.filter(

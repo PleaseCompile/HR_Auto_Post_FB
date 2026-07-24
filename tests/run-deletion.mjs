@@ -9,7 +9,7 @@ const {
   closeDatabase,
   createDraft,
   createRun,
-  deleteUnsuccessfulRun,
+  deleteRun,
   getDraft,
   getRun,
   updateTarget,
@@ -41,12 +41,18 @@ try {
   });
   let protectedRejected = false;
   try {
-    deleteUnsuccessfulRun(protectedRun.id, { acknowledgedUncertain: true });
+    deleteRun(protectedRun.id, { acknowledgedUncertain: true });
   } catch (error) {
-    protectedRejected = String(error).includes("ลบคิวนี้ไม่ได้");
+    protectedRejected = String(error).includes("ยอมรับความเสี่ยงโพสต์ซ้ำ");
   }
   if (!protectedRejected || !getRun(protectedRun.id)) {
-    throw new Error("Published run was not protected from deletion");
+    throw new Error("Published run did not require explicit acknowledgement");
+  }
+  const deletedProtected = deleteRun(protectedRun.id, {
+    acknowledgedPosted: true,
+  });
+  if (!deletedProtected || getRun(protectedRun.id)) {
+    throw new Error("Acknowledged published run was not deleted");
   }
 
   const uncertainRun = createRun({
@@ -61,7 +67,7 @@ try {
   });
   let acknowledgementRequired = false;
   try {
-    deleteUnsuccessfulRun(uncertainRun.id);
+    deleteRun(uncertainRun.id);
   } catch (error) {
     acknowledgementRequired = String(error).includes("กรุณาตรวจ Facebook");
   }
@@ -69,7 +75,7 @@ try {
     throw new Error("Uncertain run did not require explicit acknowledgement");
   }
 
-  const deleted = deleteUnsuccessfulRun(uncertainRun.id, {
+  const deleted = deleteRun(uncertainRun.id, {
     acknowledgedUncertain: true,
   });
   if (
@@ -86,11 +92,11 @@ try {
 
   const replacementRun = createRun({
     draftId: draft.id,
-    groupIds: [uncertainGroup.id],
+    groupIds: [protectedGroup.id, uncertainGroup.id],
     mode: "assisted",
   });
-  if (!replacementRun || replacementRun.targets.length !== 1) {
-    throw new Error("Deleted unsuccessful targets still blocked a replacement run");
+  if (!replacementRun || replacementRun.targets.length !== 2) {
+    throw new Error("Deleted queue targets still blocked a full replacement run");
   }
 
   console.log("Run deletion safety test passed");

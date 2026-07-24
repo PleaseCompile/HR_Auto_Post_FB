@@ -788,17 +788,19 @@ function renderRuns() {
 
 function renderRunCard(run) {
   const active = ["running", "awaiting_confirmation", "paused"].includes(run.status);
-  const protectedTargets = (run.targets || []).filter((target) =>
-    ["published", "pending_review", "submitting"].includes(target.status),
+  const postedTargets = (run.targets || []).filter((target) =>
+    ["published", "pending_review"].includes(target.status),
+  );
+  const submittingTargets = (run.targets || []).filter(
+    (target) => target.status === "submitting",
   );
   const uncertainTargets = (run.targets || []).filter(
     (target) => target.status === "manual_action_required",
   );
-  const canDeleteUnsuccessfulRun =
-    run.mode === "assisted" &&
+  const canDeleteRun =
     !active &&
     (run.targets || []).length > 0 &&
-    protectedTargets.length === 0;
+    submittingTargets.length === 0;
   const counts = (run.targets || []).reduce((map, target) => {
     map[target.status] = (map[target.status] || 0) + 1;
     return map;
@@ -859,8 +861,8 @@ function renderRunCard(run) {
           ${run.status === "paused" ? `<button class="button button-small button-primary" data-action="resume-run" data-id="${run.id}">ทำต่อ</button>` : ""}
           ${active ? `<button class="button button-small button-danger" data-action="stop-run" data-id="${run.id}">หยุด</button>` : ""}
           ${
-            canDeleteUnsuccessfulRun
-              ? `<button class="button button-small button-danger" data-action="delete-unsuccessful-run" data-id="${run.id}" data-uncertain="${uncertainTargets.length}">ลบคิวที่ไม่สำเร็จ</button>`
+            canDeleteRun
+              ? `<button class="button button-small button-danger" data-action="delete-run" data-id="${run.id}" data-uncertain="${uncertainTargets.length}" data-posted="${postedTargets.length}">ลบทั้งคิว</button>`
               : ""
           }
         </div>
@@ -1827,22 +1829,39 @@ async function handleAction(button) {
       await refreshAll();
       render();
       toast("สร้างคิวลองใหม่แล้ว กดเริ่มคิวเพื่อเตรียมโพสต์อีกครั้ง");
-    } else if (action === "delete-unsuccessful-run") {
+    } else if (action === "delete-run") {
       const sourceRun = state.runs.find((run) => run.id === button.dataset.id);
       if (!sourceRun) throw new Error("ไม่พบคิวที่ต้องการลบ");
       const uncertainCount = Number(button.dataset.uncertain || 0);
-      const message = uncertainCount
-        ? `คิวนี้มี ${uncertainCount} รายการที่ต้องตรวจด้วยตนเอง\n\nคุณตรวจ Facebook แล้วว่าไม่มีรายการใดถูกโพสต์จริงใช่ไหม?\n\nเมื่อลบ ระบบจะลบคิวและหลักฐานของคิวนี้ แล้วอนุญาตให้สร้างคิวใหม่จาก Draft และกลุ่มเดิม`
-        : "ลบคิวที่ไม่สำเร็จและหลักฐานของคิวนี้หรือไม่?\n\nDraft รูปต้นฉบับ และคลังกลุ่มจะยังอยู่ คุณสามารถเลือกทั้งหมดแล้วสร้างคิวโพสต์ใหม่ได้";
-      const accepted = window.confirm(message);
-      if (!accepted) return;
+      const postedCount = Number(button.dataset.posted || 0);
+      let acknowledgedPosted = false;
+      if (postedCount > 0) {
+        const typed = window.prompt(
+          `คิวนี้มี ${postedCount} รายการที่เผยแพร่แล้วหรือรอแอดมิน\n\nการลบจะลบประวัติและหลักฐานทั้งคิว และอาจทำให้โพสต์ซ้ำเมื่อเริ่มใหม่\n\nหากตรวจ Facebook แล้วและต้องการลบจริง ให้พิมพ์: ลบทั้งคิว`,
+          "",
+        );
+        if (typed === null) return;
+        if (typed.trim() !== "ลบทั้งคิว") {
+          toast("ยกเลิกการลบ เพราะคำยืนยันไม่ถูกต้อง", "error");
+          return;
+        }
+        acknowledgedPosted = true;
+      } else {
+        const message = uncertainCount
+          ? `คิวนี้มี ${uncertainCount} รายการที่ต้องตรวจด้วยตนเอง\n\nคุณตรวจ Facebook แล้วว่าไม่มีรายการใดถูกโพสต์จริงใช่ไหม?\n\nเมื่อลบ ระบบจะลบทั้งคิวและหลักฐาน แล้วคุณสามารถเลือกกลุ่มเดิมทั้งหมดเพื่อเริ่มใหม่`
+          : "ลบทั้งคิวและหลักฐานของคิวนี้หรือไม่?\n\nDraft รูปต้นฉบับ และคลังกลุ่มจะยังอยู่ คุณสามารถเลือกกลุ่มเดิมทั้งหมดแล้วสร้างคิวใหม่ได้";
+        if (!window.confirm(message)) return;
+      }
       await api(`/api/runs/${sourceRun.id}`, {
         method: "DELETE",
-        body: JSON.stringify({ acknowledgedUncertain: uncertainCount > 0 }),
+        body: JSON.stringify({
+          acknowledgedUncertain: uncertainCount > 0,
+          acknowledgedPosted,
+        }),
       });
       await refreshAll();
       render();
-      toast("ลบคิวที่ไม่สำเร็จแล้ว สามารถเลือกกลุ่มทั้งหมดและสร้างคิวโพสต์ใหม่ได้");
+      toast("ลบทั้งคิวแล้ว สามารถเลือกกลุ่มเดิมทั้งหมดและสร้างคิวโพสต์ใหม่ได้");
     } else if (action === "start-run") {
       await api(`/api/runs/${button.dataset.id}/start`, { method: "POST" });
       toast("เริ่มคิวแล้ว ระบบจะเปิดแท็บ Facebook ใหม่ตามรูปแบบของคิว");
