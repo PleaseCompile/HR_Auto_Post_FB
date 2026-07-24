@@ -11,6 +11,7 @@ import {
   createDraft,
   createRun,
   dashboardSummary,
+  deleteUnsuccessfulRun,
   deleteManualEvidence,
   deleteMedia,
   getDraft,
@@ -316,6 +317,36 @@ app.get("/api/runs/:id", (request, response) => {
   const run = getRun(String(request.params.id));
   if (!run) return response.status(404).json({ error: "ไม่พบคิวงาน" });
   response.json(run);
+});
+
+app.delete("/api/runs/:id", (request, response) => {
+  const runId = String(request.params.id);
+  if (runManager.isRunActive(runId)) {
+    return response.status(409).json({ error: "คิวนี้ยังทำงานอยู่ กรุณาหยุดคิวก่อนลบ" });
+  }
+  const input = z
+    .object({
+      acknowledgedUncertain: z.boolean().optional().default(false),
+    })
+    .parse(request.body || {});
+  const deleted = deleteUnsuccessfulRun(runId, input);
+  if (!deleted) return response.status(404).json({ error: "ไม่พบคิวงาน" });
+
+  let deletedEvidenceFiles = 0;
+  const safeRoot = `${path.resolve(evidenceDirectory)}${path.sep}`;
+  for (const storedPath of deleted.evidencePaths) {
+    const resolved = path.resolve(storedPath);
+    if (resolved.startsWith(safeRoot) && fs.existsSync(resolved)) {
+      fs.unlinkSync(resolved);
+      deletedEvidenceFiles += 1;
+    }
+  }
+  response.json({
+    ok: true,
+    runId: deleted.runId,
+    targetCount: deleted.targetCount,
+    deletedEvidenceFiles,
+  });
 });
 
 app.post("/api/runs", (request, response) => {

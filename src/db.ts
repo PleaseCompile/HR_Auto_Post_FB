@@ -649,6 +649,55 @@ export function getRun(id: string): RunRecord | null {
   return row ? rowToRun(row, true) : null;
 }
 
+export function deleteUnsuccessfulRun(
+  id: string,
+  options: { acknowledgedUncertain?: boolean } = {},
+): { runId: string; targetCount: number; evidencePaths: string[] } | null {
+  const run = getRun(id);
+  if (!run) return null;
+  if (["running", "awaiting_confirmation", "paused"].includes(run.status)) {
+    throw new Error("กรุณาหยุดคิวและรอให้แท็บ Facebook ปิดครบก่อนลบ");
+  }
+  const targets = run.targets || [];
+  const protectedTargets = targets.filter((target) =>
+    ["published", "pending_review", "submitting"].includes(target.status),
+  );
+  if (protectedTargets.length) {
+    throw new Error(
+      `ลบคิวนี้ไม่ได้ เพราะมี ${protectedTargets.length} รายการที่เผยแพร่ รออนุมัติ หรือกำลังส่ง`,
+    );
+  }
+  const uncertainTargets = targets.filter(
+    (target) => target.status === "manual_action_required",
+  );
+  if (uncertainTargets.length && !options.acknowledgedUncertain) {
+    throw new Error(
+      `มี ${uncertainTargets.length} รายการที่ต้องตรวจด้วยตนเอง กรุณาตรวจ Facebook ว่ายังไม่ได้โพสต์และยืนยันก่อนลบ`,
+    );
+  }
+
+  const evidencePaths = new Set<string>();
+  targets.forEach((target) => {
+    if (target.evidencePath) evidencePaths.add(target.evidencePath);
+  });
+  const manualPaths = db
+    .prepare(
+      `SELECT me.stored_path
+       FROM manual_evidence me
+       JOIN run_targets rt ON rt.id = me.target_id
+       WHERE rt.run_id = ?`,
+    )
+    .all(id) as Array<{ stored_path: string }>;
+  manualPaths.forEach((item) => evidencePaths.add(item.stored_path));
+
+  db.prepare("DELETE FROM runs WHERE id = ?").run(id);
+  return {
+    runId: id,
+    targetCount: targets.length,
+    evidencePaths: [...evidencePaths],
+  };
+}
+
 export function updateRunWorkflow(
   id: string,
   workflow: RunWorkflow,

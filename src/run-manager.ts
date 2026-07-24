@@ -55,6 +55,10 @@ class RunManager {
     return this.controllers.size > 0;
   }
 
+  isRunActive(runId: string): boolean {
+    return this.controllers.has(runId);
+  }
+
   start(runId: string): void {
     if (this.controllers.has(runId)) throw new Error("คิวนี้กำลังทำงานอยู่");
     const run = getRun(runId);

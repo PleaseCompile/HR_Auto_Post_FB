@@ -7,6 +7,12 @@ const port = 4176;
 const baseUrl = `http://127.0.0.1:${port}`;
 const dataDirectory = path.resolve("test-results", `buttons-${Date.now()}`);
 const fixturePath = path.join(dataDirectory, "fixture.png");
+const todayBangkok = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Bangkok",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+}).format(new Date());
 fs.mkdirSync(dataDirectory, { recursive: true });
 fs.writeFileSync(
   fixturePath,
@@ -60,7 +66,7 @@ try {
   const seedDraft = await request("/api/drafts", {
     method: "POST",
     body: JSON.stringify({
-      workDate: "2026-07-23",
+      workDate: todayBangkok,
       slot: "morning",
       text: "Seed draft for button audit",
     }),
@@ -484,6 +490,7 @@ try {
     },
   ];
   let clonedAssistedPayload = null;
+  let deletedRunPayload = null;
   await page.route(`${baseUrl}/api/runs`, async (route) => {
     if (route.request().method() === "GET") {
       await route.fulfill({ json: mockedRuns });
@@ -521,14 +528,26 @@ try {
   });
   await page.route(`${baseUrl}/api/runs/mock-recovery-run/**`, async (route) => {
     const url = route.request().url();
+    const recoveryRun = mockedRuns.find((run) => run.id === "mock-recovery-run");
+    if (!recoveryRun) throw new Error("Recovery mock run is missing");
     if (url.endsWith("/workflow")) {
       const payload = route.request().postDataJSON();
-      mockedRuns[3].workflow = payload.workflow;
-      mockedRuns[3].tabLimit = payload.tabLimit;
+      recoveryRun.workflow = payload.workflow;
+      recoveryRun.tabLimit = payload.tabLimit;
     } else if (url.endsWith("/reconcile-posted")) {
-      mockedRuns[3].targets[0].status = "published";
+      recoveryRun.targets[0].status = "published";
     }
     await route.fulfill({ json: { ok: true } });
+  });
+  await page.route(`${baseUrl}/api/runs/mock-failed-run`, async (route) => {
+    if (route.request().method() === "DELETE") {
+      deletedRunPayload = route.request().postDataJSON();
+      const index = mockedRuns.findIndex((run) => run.id === "mock-failed-run");
+      if (index >= 0) mockedRuns.splice(index, 1);
+      await route.fulfill({ json: { ok: true, runId: "mock-failed-run" } });
+      return;
+    }
+    await route.continue();
   });
   await navigate("runs", "คิวและการทำงาน");
   await check("Runs: status colors and legend", async () => {
@@ -592,7 +611,8 @@ try {
       .getByRole("button", { name: "เปลี่ยนเป็น Hybrid" })
       .click();
     await page.getByText("เปลี่ยนเป็น Hybrid แบบเปิดทุกกลุ่มพร้อมกันแล้ว").waitFor();
-    if (mockedRuns[3].workflow !== "hybrid-tabs" || mockedRuns[3].tabLimit !== 0) {
+    const recoveryRun = mockedRuns.find((run) => run.id === "mock-recovery-run");
+    if (recoveryRun?.workflow !== "hybrid-tabs" || recoveryRun?.tabLimit !== 0) {
       throw new Error("Interrupted run workflow was not updated");
     }
   });
@@ -711,6 +731,21 @@ try {
     await page.getByRole("button", { name: "ล้างตัวกรองทั้งหมด" }).click();
     if ((await page.locator(".evidence-result-row").count()) !== 6) {
       throw new Error("Clear history filters did not restore all evidence");
+    }
+  });
+  await navigate("runs", "คิวและการทำงาน");
+  await check("Runs: delete unsuccessful queue", async () => {
+    page.once("dialog", (dialog) => dialog.accept());
+    await page
+      .locator(".run-card")
+      .filter({ hasText: "Composer was not ready" })
+      .getByRole("button", { name: "ลบคิวที่ไม่สำเร็จ" })
+      .click();
+    await page
+      .getByText("ลบคิวที่ไม่สำเร็จแล้ว สามารถเลือกกลุ่มทั้งหมดและสร้างคิวโพสต์ใหม่ได้")
+      .waitFor();
+    if (!deletedRunPayload || mockedRuns.some((run) => run.id === "mock-failed-run")) {
+      throw new Error("Unsuccessful run was not deleted through the UI");
     }
   });
 
