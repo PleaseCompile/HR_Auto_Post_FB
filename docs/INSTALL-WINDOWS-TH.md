@@ -68,9 +68,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-windows.ps1
 
 1. เปลี่ยนตำแหน่งไปยังโฟลเดอร์โครงการ
 2. ตรวจ Node.js
-3. ติดตั้ง dependencies เมื่อยังไม่มี `node_modules`
-4. Build เมื่อยังไม่มี `dist/server.js`
-5. เปิด <http://127.0.0.1:4173>
+3. ตรวจว่ามี HR Auto ที่ตอบสนองปกติอยู่แล้วหรือไม่ เพื่อป้องกันการรัน Node ซ้อน
+4. ติดตั้ง dependencies เมื่อยังไม่มี `node_modules`
+5. Build โค้ดล่าสุด
+6. เริ่มเซิร์ฟเวอร์ รอ `/api/health` และเปิด <http://127.0.0.1:4173> เมื่อพร้อมจริง
 
 เก็บหน้าต่าง PowerShell ไว้ตลอดเวลาที่ใช้งาน กด `Ctrl+C` เพื่อปิดอย่างปกติ
 
@@ -174,4 +175,3 @@ npm start
 ```
 
 [ขั้นถัดไป: คู่มือใช้งาน](USER-GUIDE-TH.md)
-

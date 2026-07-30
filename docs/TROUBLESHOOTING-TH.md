@@ -55,6 +55,7 @@ http://127.0.0.1:4173/api/session
 | อาการ | สาเหตุที่เป็นไปได้ | ตรวจอย่างไร | วิธีแก้ |
 |---|---|---|---|
 | หน้าเว็บเปิดไม่ได้ | Server ไม่ทำงาน | ดู Terminal, `/api/health` | รัน start script และตรวจ Port |
+| หน้าเว็บขาวและ Terminal บอกว่าพร้อม | Node เดิมค้างหรือรันสคริปต์ซ้อน | เปิด `/api/health`; ถ้าหมุนค้างแสดงว่า Process ค้าง | กด `Ctrl+C` หนึ่งครั้ง แล้วรัน `start-windows.ps1` เพียงครั้งเดียว |
 | `EADDRINUSE` | Port ถูกใช้ | ตรวจ Port | ปิด Process เดิมหรือเปลี่ยน `PORT` |
 | `Cannot find module` | ติดตั้งไม่ครบ | ตรวจ `node_modules` | `npm install` |
 | `Executable doesn't exist` | ไม่มี Chromium | `npx playwright install --list` | `npm run install-browser` |
@@ -71,6 +72,19 @@ http://127.0.0.1:4173/api/session
 | ค้นหากลุ่มไม่เจอ | Query ตัดคำ/เงื่อนไขไม่ตรง | ลองคำเดียว | ใช้ AND, `|`, `"วลี"`, `-คำ` |
 
 ## หน้าเว็บเปิดไม่ได้
+
+### Windows แสดงหน้าขาวทั้งที่ Terminal บอกว่าพร้อม
+
+1. เปิด <http://127.0.0.1:4173/api/health>
+2. ถ้าเห็น JSON ที่มี `"ok": true` ให้กลับหน้า HR Auto แล้วกด `Ctrl+F5`
+3. ถ้า Health หมุนค้าง ให้กลับ Terminal ที่รัน HR Auto แล้วกด `Ctrl+C` หนึ่งครั้ง
+4. รันคำสั่งต่อไปนี้เพียงครั้งเดียว:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-windows.ps1
+```
+
+สคริปต์รุ่นปัจจุบันจะตรวจเซิร์ฟเวอร์เดิมก่อน หาก HR Auto ทำงานปกติอยู่แล้วจะเปิดหน้าเดิมโดยไม่สร้าง Node ซ้อน และเมื่อเริ่มใหม่จะรอให้ Health ตอบก่อนเปิดเบราว์เซอร์
 
 ### Windows
 

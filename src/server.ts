@@ -648,6 +648,17 @@ const server = app.listen(port, "127.0.0.1", () => {
   console.log(`ข้อมูลถูกเก็บไว้ที่ ${dataDirectory}`);
 });
 
+server.on("error", (error: NodeJS.ErrnoException) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(
+      `พอร์ต ${port} ถูกใช้งานอยู่แล้ว กรุณาเปิด http://127.0.0.1:${port} หรือปิด HR Auto ตัวเดิมก่อนรันใหม่`,
+    );
+  } else {
+    console.error(error);
+  }
+  process.exit(1);
+});
+
 async function shutdown() {
   await browserSession.close();
   server.close(() => process.exit(0));
