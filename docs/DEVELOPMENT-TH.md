@@ -93,10 +93,14 @@ Smoke tests บางส่วนอาจเปิด Server หรือ Brows
 ### เปลี่ยน Hybrid
 
 - `tests/hybrid-run.mjs`
+- `tests/windowed-run.mjs`
+- `npm run test:window-session` สำหรับตรวจ Window ID จริง (เปิด Chromium ชั่วคราว)
 - 1, 3 และหลายกลุ่ม
-- tabLimit 0 และค่าจำกัด
+- Hybrid แบบเดิม: tabLimit 0 และค่าจำกัด
+- หลายหน้าต่าง: 30 + 30 + ส่วนที่เหลือ, ปฏิเสธค่ามากกว่า 30
 - pause/resume/stop
 - ปิดแท็บระหว่าง awaiting confirmation
+- ยืนยันว่า mark-posted, skip และ stop ไม่ปิดแท็บในโหมดหลายหน้าต่าง
 
 ### เปลี่ยน Group Scan
 
@@ -154,4 +158,3 @@ git push -u origin HEAD
 - [ ] ไม่มีข้อมูลจริงหรือ Session ใน Git
 - [ ] ระบุ migration/backup instruction
 - [ ] ทดสอบ Dry run ก่อน Assisted
-

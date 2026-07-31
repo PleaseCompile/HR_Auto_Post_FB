@@ -131,6 +131,51 @@ try {
     throw new Error("Saved run did not contain expected draft/target data");
   }
 
+  const windowedGroup = await jsonRequest("/api/groups", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Windowed smoke test group",
+      url: `https://www.facebook.com/groups/windowed-smoke-${Date.now()}`,
+      tags: ["test", "windows"],
+    }),
+  });
+  const windowedRun = await jsonRequest("/api/runs", {
+    method: "POST",
+    body: JSON.stringify({
+      draftId: draft.id,
+      groupIds: [windowedGroup.id],
+      mode: "assisted",
+      workflow: "hybrid-windows",
+      tabLimit: 30,
+    }),
+  });
+  const savedWindowedRun = await jsonRequest(`/api/runs/${windowedRun.id}`);
+  if (
+    savedWindowedRun.workflow !== "hybrid-windows" ||
+    savedWindowedRun.tabLimit !== 30
+  ) {
+    throw new Error("Windowed workflow settings were not saved");
+  }
+
+  const overLimitResponse = await fetch(`http://127.0.0.1:${port}/api/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      draftId: draft.id,
+      groupIds: [windowedGroup.id],
+      mode: "assisted",
+      workflow: "hybrid-windows",
+      tabLimit: 31,
+    }),
+  });
+  const overLimitBody = await overLimitResponse.json();
+  if (
+    overLimitResponse.status !== 400 ||
+    !String(overLimitBody.error || "").includes("30")
+  ) {
+    throw new Error("Windowed workflow did not reject more than 30 tabs");
+  }
+
   const targetId = saved.targets[0].id;
   const evidenceForm = new FormData();
   evidenceForm.append(

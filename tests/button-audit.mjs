@@ -284,11 +284,12 @@ try {
       throw new Error("Assisted mode should be the default queue mode");
     }
     if (
-      (await page.locator("#runWorkflow").inputValue()) !== "hybrid-tabs" ||
-      (await page.locator("#runTabLimit").inputValue()) !== "0"
+      (await page.locator("#runWorkflow").inputValue()) !== "hybrid-windows" ||
+      (await page.locator("#runTabLimit").inputValue()) !== "30"
     ) {
-      throw new Error("Hybrid workflow with all selected groups should be the default");
+      throw new Error("Windowed workflow with 30 tabs per window should be the default");
     }
+    await page.getByText(/1 กลุ่ม → 1 หน้าต่าง \(1 แท็บ\)/).waitFor();
     await page.locator("#runMode").selectOption("dry-run");
     await page.getByRole("button", { name: "สร้างคิวโพสต์" }).click();
     await page.getByRole("heading", { name: "คิวและการทำงาน" }).waitFor();
@@ -634,15 +635,17 @@ try {
       throw new Error("Failed-target retry did not create the expected assisted queue");
     }
   });
-  await check("Runs: switch interrupted queue to Hybrid", async () => {
+  await check("Runs: switch interrupted queue to multiple windows", async () => {
     await page
       .locator(".run-card")
       .filter({ hasText: "Recovery mock group" })
-      .getByRole("button", { name: "เปลี่ยนเป็น Hybrid" })
+      .getByRole("button", { name: "เปลี่ยนเป็นหลายหน้าต่าง" })
       .click();
-    await page.getByText("เปลี่ยนเป็น Hybrid แบบเปิดทุกกลุ่มพร้อมกันแล้ว").waitFor();
+    await page
+      .getByText("เปลี่ยนเป็นหลายหน้าต่าง สูงสุด 30 แท็บต่อหน้าต่าง และไม่ปิดแท็บเองแล้ว")
+      .waitFor();
     const recoveryRun = mockedRuns.find((run) => run.id === "mock-recovery-run");
-    if (recoveryRun?.workflow !== "hybrid-tabs" || recoveryRun?.tabLimit !== 0) {
+    if (recoveryRun?.workflow !== "hybrid-windows" || recoveryRun?.tabLimit !== 30) {
       throw new Error("Interrupted run workflow was not updated");
     }
   });

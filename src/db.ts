@@ -270,15 +270,19 @@ function rowToManualEvidence(row: any): ManualEvidenceRecord {
 }
 
 function rowToRun(row: any, expanded = false): RunRecord {
+  const workflow = (row.workflow || "sequential") as RunWorkflow;
+  const rawTabLimit = Number(row.tab_limit);
   const run: RunRecord = {
     id: row.id,
     draftId: row.draft_id,
     mode: row.mode,
-    workflow: row.workflow || "sequential",
+    workflow,
     tabLimit:
-      Number(row.tab_limit) === 0
-        ? 0
-        : Math.max(1, Math.round(Number(row.tab_limit) || 3)),
+      workflow === "hybrid-windows"
+        ? Math.min(30, Math.max(1, Math.round(rawTabLimit || 30)))
+        : rawTabLimit === 0
+          ? 0
+          : Math.max(1, Math.round(rawTabLimit || 3)),
     status: row.status,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -593,15 +597,22 @@ type RunDeletionOptions = {
   acknowledgedPosted?: boolean;
 };
 
+function normalizeRunTabLimit(input: RunCreationInput): number {
+  if (input.mode === "dry-run" || input.workflow === "sequential") return 0;
+  if (input.workflow === "hybrid-windows") {
+    return Math.min(30, Math.max(1, Math.round(input.tabLimit || 30)));
+  }
+  return input.tabLimit === undefined || input.tabLimit === 0
+    ? 0
+    : Math.max(1, Math.round(input.tabLimit));
+}
+
 function insertRun(input: RunCreationInput): RunRecord {
   const uniqueGroupIds = [...new Set(input.groupIds)];
   const id = randomUUID();
   const now = new Date().toISOString();
   const workflow = input.mode === "dry-run" ? "sequential" : input.workflow || "sequential";
-  const tabLimit =
-    input.tabLimit === undefined || input.tabLimit === 0
-      ? 0
-      : Math.max(1, Math.round(input.tabLimit));
+  const tabLimit = normalizeRunTabLimit(input);
   const insertRunStatement = db.prepare(
     `INSERT INTO runs(id, draft_id, mode, workflow, tab_limit, status, created_at)
      VALUES (?, ?, ?, ?, ?, 'queued', ?)`,
@@ -811,7 +822,11 @@ export function updateRunWorkflow(
   }
   db.prepare("UPDATE runs SET workflow = ?, tab_limit = ? WHERE id = ?").run(
     workflow,
-    tabLimit === 0 ? 0 : Math.max(1, Math.round(tabLimit)),
+    workflow === "hybrid-windows"
+      ? Math.min(30, Math.max(1, Math.round(tabLimit || 30)))
+      : workflow === "sequential" || tabLimit === 0
+        ? 0
+        : Math.max(1, Math.round(tabLimit)),
     id,
   );
   return getRun(id);

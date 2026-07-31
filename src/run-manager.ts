@@ -29,7 +29,8 @@ interface ActionRequest {
 }
 
 interface PendingPrepared {
-  prepared: PreparedPost;
+  prepared: PreparedPost | null;
+  page: Page;
   target: RunTargetRecord;
   draft: DraftRecord;
 }
@@ -71,7 +72,9 @@ class RunManager {
       paused: false,
       workflow: run.workflow || "sequential",
       tabLimit:
-        run.tabLimit === 0
+        run.workflow === "hybrid-windows"
+          ? Math.min(30, Math.max(1, run.tabLimit || 30))
+          : run.tabLimit === 0
           ? Number.POSITIVE_INFINITY
           : Math.max(1, run.tabLimit || 3),
       waitingTargetId: null,
@@ -128,7 +131,7 @@ class RunManager {
     const controller = this.requireController(runId);
     const pending = controller.prepared.get(targetId);
     if (!pending) throw new Error("ไม่พบแท็บ Facebook ของกลุ่มนี้");
-    await pending.prepared.page.bringToFront();
+    await pending.page.bringToFront();
   }
 
   async reconcilePosted(runId: string, targetId: string): Promise<void> {
@@ -190,9 +193,13 @@ class RunManager {
     });
   }
 
-  private async closePrepared(pending: PendingPrepared): Promise<void> {
-    await pending.prepared.page.keyboard.press("Escape").catch(() => undefined);
-    await pending.prepared.page.close().catch(() => undefined);
+  private async closePrepared(
+    controller: Controller,
+    pending: PendingPrepared,
+  ): Promise<void> {
+    if (controller.workflow === "hybrid-windows") return;
+    await pending.page.keyboard.press("Escape").catch(() => undefined);
+    await pending.page.close().catch(() => undefined);
   }
 
   private async abandonPrepared(
@@ -203,7 +210,7 @@ class RunManager {
     const pending = controller.prepared.get(targetId);
     if (!pending) return;
     const evidencePath = await captureEvidence({
-      page: pending.prepared.page,
+      page: pending.page,
       workDate: pending.draft.workDate,
       slot: pending.draft.slot,
       runId,
@@ -212,10 +219,13 @@ class RunManager {
       postText: pending.draft.text,
     }).catch(() => null);
     updateTarget(targetId, "manual_action_required", {
-      message: "หยุดคิวระหว่างรอยืนยัน เก็บหลักฐานแล้ว กรุณาตรวจว่าโพสต์ถูกส่งหรือไม่",
+      message:
+        controller.workflow === "hybrid-windows"
+          ? "หยุดคิวแล้ว แต่แท็บยังเปิดอยู่ตามที่กำหนด กรุณาจัดการและปิดแท็บด้วยตนเอง"
+          : "หยุดคิวระหว่างรอยืนยัน เก็บหลักฐานแล้ว กรุณาตรวจว่าโพสต์ถูกส่งหรือไม่",
       evidencePath,
     });
-    await this.closePrepared(pending);
+    await this.closePrepared(controller, pending);
     controller.prepared.delete(targetId);
   }
 
@@ -234,7 +244,7 @@ class RunManager {
     try {
       if (action === "skip") {
         const evidencePath = await captureEvidence({
-          page: pending.prepared.page,
+          page: pending.page,
           workDate: pending.draft.workDate,
           slot: pending.draft.slot,
           runId,
@@ -250,9 +260,9 @@ class RunManager {
       }
 
       if (action === "mark-posted") {
-        await pending.prepared.page.waitForTimeout(800);
+        await pending.page.waitForTimeout(800);
         const evidencePath = await captureEvidence({
-          page: pending.prepared.page,
+          page: pending.page,
           workDate: pending.draft.workDate,
           slot: pending.draft.slot,
           runId,
@@ -268,10 +278,15 @@ class RunManager {
         return;
       }
 
+      if (!pending.prepared) {
+        throw new Error(
+          "ระบบเตรียมโพสต์ในแท็บนี้ไม่ครบ กรุณาจัดการใน Facebook แล้วเลือก “ฉันโพสต์เองแล้ว” หรือ “ข้าม”",
+        );
+      }
       updateTarget(targetId, "submitting", { message: "กำลังกดโพสต์ในแท็บนี้" });
       const result = await submitPreparedPost(pending.prepared);
       const evidencePath = await captureEvidence({
-        page: pending.prepared.page,
+        page: pending.page,
         workDate: pending.draft.workDate,
         slot: pending.draft.slot,
         runId,
@@ -293,7 +308,7 @@ class RunManager {
     } catch (error) {
       const message = error instanceof Error ? error.message : "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ";
       const evidencePath = await captureEvidence({
-        page: pending.prepared.page,
+        page: pending.page,
         workDate: pending.draft.workDate,
         slot: pending.draft.slot,
         runId,
@@ -303,7 +318,7 @@ class RunManager {
       }).catch(() => null);
       updateTarget(targetId, "failed", { message, evidencePath });
     } finally {
-      await this.closePrepared(pending);
+      await this.closePrepared(controller, pending);
       controller.prepared.delete(targetId);
       controller.acting.delete(targetId);
     }
@@ -312,6 +327,7 @@ class RunManager {
   private async recordPreparationFailure(
     page: Page,
     run: RunRecord,
+    controller: Controller,
     target: RunTargetRecord,
     error: unknown,
   ): Promise<void> {
@@ -325,6 +341,20 @@ class RunManager {
       suffix: "failed",
       postText: run.draft!.text,
     }).catch(() => null);
+    if (controller.workflow === "hybrid-windows") {
+      controller.prepared.set(target.id, {
+        prepared: null,
+        page,
+        target,
+        draft: run.draft!,
+      });
+      updateTarget(target.id, "manual_action_required", {
+        message: `ระบบเตรียมไม่ครบ แต่เก็บแท็บไว้ให้จัดการเอง · ${message}`,
+        evidencePath,
+      });
+      updateRunStatus(run.id, "awaiting_confirmation");
+      return;
+    }
     updateTarget(target.id, "failed", { message, evidencePath });
     await page.close().catch(() => undefined);
   }
@@ -363,27 +393,35 @@ class RunManager {
     run: RunRecord,
     controller: Controller,
     target: RunTargetRecord,
+    existingPage?: Page,
   ): Promise<void> {
     if (!target.group || !run.draft) return;
-    const page = await browserSession.newPage();
+    const page = existingPage || (await browserSession.newPage());
     updateTarget(target.id, "opening", { message: "กำลังเปิดแท็บใหม่สำหรับกลุ่มนี้" });
     try {
       updateTarget(target.id, "preparing", { message: "กำลังใส่ข้อความและรูปในแท็บใหม่" });
       const prepared = await preparePost(page, run.draft, target.group);
-      controller.prepared.set(target.id, { prepared, target, draft: run.draft });
+      controller.prepared.set(target.id, {
+        prepared,
+        page,
+        target,
+        draft: run.draft,
+      });
       if (controller.stopped) {
         await this.abandonPrepared(run.id, controller, target.id);
         return;
       }
       updateTarget(target.id, "awaiting_confirmation", {
         message:
-          controller.workflow === "hybrid-tabs"
+          controller.workflow === "hybrid-windows"
+            ? "พร้อมในหน้าต่างแบบแบ่งชุด · แท็บจะไม่ปิดเอง จัดการใน Facebook แล้วบันทึกผล"
+            : controller.workflow === "hybrid-tabs"
             ? "พร้อมในแท็บใหม่ · ยืนยัน โพสต์เอง หรือข้ามพร้อมหลักฐานได้"
             : "พร้อมในแท็บใหม่ · คิวรอคำสั่งจากคุณก่อนทำกลุ่มถัดไป",
       });
       updateRunStatus(run.id, "awaiting_confirmation");
     } catch (error) {
-      await this.recordPreparationFailure(page, run, target, error);
+      await this.recordPreparationFailure(page, run, controller, target, error);
     }
   }
 
@@ -432,6 +470,48 @@ class RunManager {
     }
   }
 
+  private async executeHybridWindows(
+    run: RunRecord,
+    controller: Controller,
+  ): Promise<void> {
+    const targets = (run.targets || []).filter(
+      (target) =>
+        ["queued", "failed"].includes(target.status) && Boolean(target.group),
+    );
+    const tabsPerWindow = Math.min(30, Math.max(1, controller.tabLimit || 30));
+    let windowAnchor: Page | null = null;
+    let tabsInWindow = 0;
+
+    for (const target of targets) {
+      await this.waitWhilePaused(controller);
+      if (controller.stopped) break;
+
+      let page: Page;
+      if (!windowAnchor || windowAnchor.isClosed() || tabsInWindow >= tabsPerWindow) {
+        page = await browserSession.newWindow();
+        windowAnchor = page;
+        tabsInWindow = 1;
+      } else {
+        page = await browserSession.newPageInWindow(windowAnchor);
+        windowAnchor = page;
+        tabsInWindow += 1;
+      }
+      await this.prepareInNewTab(run, controller, target, page);
+    }
+
+    while (
+      !controller.stopped &&
+      (controller.prepared.size > 0 || controller.acting.size > 0)
+    ) {
+      await delay(250);
+    }
+    if (controller.stopped) {
+      for (const targetId of [...controller.prepared.keys()]) {
+        await this.abandonPrepared(run.id, controller, targetId);
+      }
+    }
+  }
+
   private async execute(runId: string, controller: Controller): Promise<void> {
     try {
       const session = await browserSession.status();
@@ -442,6 +522,8 @@ class RunManager {
 
       if (run.mode === "dry-run") {
         await this.executeDryRun(run, controller);
+      } else if (controller.workflow === "hybrid-windows") {
+        await this.executeHybridWindows(run, controller);
       } else if (controller.workflow === "hybrid-tabs") {
         await this.executeHybrid(run, controller);
       } else {

@@ -149,6 +149,20 @@ function currentSlot() {
   return "evening";
 }
 
+function windowBatchSummary(total, limit = 30) {
+  const safeTotal = Math.max(0, Number(total) || 0);
+  const safeLimit = Math.min(30, Math.max(1, Number(limit) || 30));
+  const batches = [];
+  for (let remaining = safeTotal; remaining > 0; remaining -= safeLimit) {
+    batches.push(Math.min(safeLimit, remaining));
+  }
+  return {
+    count: batches.length,
+    batches,
+    text: `${safeTotal.toLocaleString("th-TH")} กลุ่ม → ${batches.length.toLocaleString("th-TH")} หน้าต่าง (${batches.join(" + ") || "0"} แท็บ)`,
+  };
+}
+
 function truncate(value, length = 70) {
   if (!value) return "ยังไม่มีข้อความ";
   return value.length > length ? `${value.slice(0, length)}…` : value;
@@ -623,18 +637,16 @@ function renderGroups() {
                 <option value="dry-run">Dry run — ตรวจกลุ่มเท่านั้น ไม่โพสต์</option>
               </select>
               <select id="runWorkflow" style="width:270px">
-                <option value="hybrid-tabs">Hybrid — เตรียมหลายแท็บ ไม่บล็อกทั้งคิว</option>
+                <option value="hybrid-windows">หลายหน้าต่าง — ไม่ปิดแท็บเอง</option>
+                <option value="hybrid-tabs">Hybrid เดิม — จำกัดแท็บพร้อมกัน</option>
                 <option value="sequential">ทีละกลุ่ม — รอยืนยันก่อนทำกลุ่มถัดไป</option>
               </select>
               <select id="runTabLimit" style="width:190px" aria-label="จำนวนแท็บพร้อมกัน">
-                <option value="0" selected>ทั้งหมด ${selected.toLocaleString("th-TH")} กลุ่ม</option>
-                <option value="2">สูงสุด 2 แท็บ</option>
-                <option value="3">สูงสุด 3 แท็บ</option>
-                <option value="4">สูงสุด 4 แท็บ</option>
-                <option value="5">สูงสุด 5 แท็บ</option>
-                <option value="10">สูงสุด 10 แท็บ</option>
-                <option value="20">สูงสุด 20 แท็บ</option>
+                <option value="30" selected>30 แท็บต่อหน้าต่าง</option>
+                <option value="20">20 แท็บต่อหน้าต่าง</option>
+                <option value="10">10 แท็บต่อหน้าต่าง</option>
               </select>
+              <span id="runWindowPlan" class="muted" style="font-size:11px">${escapeHtml(windowBatchSummary(selected, 30).text)}</span>
               <button class="button button-primary" data-action="create-run">สร้างคิวโพสต์</button>
               <button class="button button-danger" data-action="restart-draft-run" title="ลบทุกคิวเดิมของ Draft ที่เลือก แล้วสร้างคิวใหม่จากกลุ่มที่เลือกอยู่">
                 ล้างคิวเดิมทั้งหมดและสร้างใหม่
@@ -822,7 +834,9 @@ function renderRunCard(run) {
             <span class="tag">${
               run.mode === "dry-run"
                 ? "DRY RUN · ไม่โพสต์"
-                : run.workflow === "hybrid-tabs"
+                : run.workflow === "hybrid-windows"
+                  ? `หลายหน้าต่าง · ${run.tabLimit || 30} แท็บ/หน้าต่าง · ไม่ปิดเอง`
+                  : run.workflow === "hybrid-tabs"
                   ? run.tabLimit === 0
                     ? "HYBRID · ทุกกลุ่มพร้อมกัน"
                     : `HYBRID · สูงสุด ${run.tabLimit || 3} แท็บ`
@@ -854,8 +868,8 @@ function renderRunCard(run) {
           ${
             run.mode === "assisted" &&
             ["queued", "interrupted", "stopped"].includes(run.status)
-              ? `<button class="button button-small button-ghost" data-action="switch-workflow" data-id="${run.id}" data-workflow="${run.workflow === "hybrid-tabs" ? "sequential" : "hybrid-tabs"}">${
-                  run.workflow === "hybrid-tabs" ? "เปลี่ยนเป็นทีละกลุ่ม" : "เปลี่ยนเป็น Hybrid"
+              ? `<button class="button button-small button-ghost" data-action="switch-workflow" data-id="${run.id}" data-workflow="${run.workflow === "hybrid-windows" ? "sequential" : "hybrid-windows"}">${
+                  run.workflow === "hybrid-windows" ? "เปลี่ยนเป็นทีละกลุ่ม" : "เปลี่ยนเป็นหลายหน้าต่าง"
                 }</button>`
               : ""
           }
@@ -894,7 +908,13 @@ function renderRunCard(run) {
                   }
                   ${
                     target.status === "manual_action_required"
-                      ? `<button class="button button-small button-secondary" data-action="reconcile-posted" data-run="${run.id}" data-target="${target.id}">ยืนยันว่าโพสต์เองแล้ว</button>`
+                      ? run.workflow === "hybrid-windows" && active
+                        ? `
+                          <button class="button button-small button-ghost" data-action="focus-target" data-run="${run.id}" data-target="${target.id}">เปิดแท็บ</button>
+                          <button class="button button-small button-ghost" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="skip">ข้าม + หลักฐาน</button>
+                          <button class="button button-small button-secondary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="mark-posted">ฉันโพสต์เองแล้ว</button>
+                        `
+                        : `<button class="button button-small button-secondary" data-action="reconcile-posted" data-run="${run.id}" data-target="${target.id}">ยืนยันว่าโพสต์เองแล้ว</button>`
                       : ""
                   }
                   <button class="button button-small button-ghost" data-action="manage-evidence" data-target="${target.id}">จัดการหลักฐาน${
@@ -1541,14 +1561,52 @@ function bindGroupEvents() {
   const runMode = document.querySelector("#runMode");
   const runWorkflow = document.querySelector("#runWorkflow");
   const runTabLimit = document.querySelector("#runTabLimit");
+  const runWindowPlan = document.querySelector("#runWindowPlan");
   const syncRunWorkflowControls = () => {
     if (!runMode || !runWorkflow || !runTabLimit) return;
     const assisted = runMode.value === "assisted";
+    const windowed = runWorkflow.value === "hybrid-windows";
+    const hybrid = runWorkflow.value === "hybrid-tabs";
+    const currentValue = runTabLimit.value;
     runWorkflow.disabled = !assisted;
-    runTabLimit.disabled = !assisted || runWorkflow.value !== "hybrid-tabs";
+    runTabLimit.disabled = !assisted || (!windowed && !hybrid);
+    if (windowed) {
+      runTabLimit.innerHTML = `
+        <option value="30">30 แท็บต่อหน้าต่าง</option>
+        <option value="20">20 แท็บต่อหน้าต่าง</option>
+        <option value="10">10 แท็บต่อหน้าต่าง</option>
+      `;
+      runTabLimit.value = ["10", "20", "30"].includes(currentValue)
+        ? currentValue
+        : "30";
+    } else if (hybrid) {
+      runTabLimit.innerHTML = `
+        <option value="0">ทุกกลุ่มพร้อมกัน</option>
+        <option value="2">สูงสุด 2 แท็บ</option>
+        <option value="3">สูงสุด 3 แท็บ</option>
+        <option value="4">สูงสุด 4 แท็บ</option>
+        <option value="5">สูงสุด 5 แท็บ</option>
+        <option value="10">สูงสุด 10 แท็บ</option>
+        <option value="20">สูงสุด 20 แท็บ</option>
+        <option value="30">สูงสุด 30 แท็บ</option>
+      `;
+      runTabLimit.value = ["0", "2", "3", "4", "5", "10", "20", "30"].includes(
+        currentValue,
+      )
+        ? currentValue
+        : "0";
+    }
+    if (runWindowPlan) {
+      runWindowPlan.hidden = !assisted || !windowed;
+      runWindowPlan.textContent = windowBatchSummary(
+        state.selectedGroups.size,
+        Number(runTabLimit.value || 30),
+      ).text;
+    }
   };
   runMode?.addEventListener("change", syncRunWorkflowControls);
   runWorkflow?.addEventListener("change", syncRunWorkflowControls);
+  runTabLimit?.addEventListener("change", syncRunWorkflowControls);
   syncRunWorkflowControls();
 
   document.querySelector("#groupSearch")?.addEventListener("input", (event) => {
@@ -1767,9 +1825,14 @@ async function handleAction(button) {
       const workflow =
         mode === "dry-run"
           ? "sequential"
-          : document.querySelector("#runWorkflow")?.value || "hybrid-tabs";
+          : document.querySelector("#runWorkflow")?.value || "hybrid-windows";
       const tabLimitValue = document.querySelector("#runTabLimit")?.value;
-      const tabLimit = tabLimitValue === "0" ? 0 : Number(tabLimitValue || 3);
+      const tabLimit =
+        workflow === "hybrid-windows"
+          ? Number(tabLimitValue || 30)
+          : tabLimitValue === "0"
+            ? 0
+            : Number(tabLimitValue || 3);
       if (!draftId) throw new Error("กรุณาเลือก Draft");
       await api("/api/runs", {
         method: "POST",
@@ -1796,9 +1859,14 @@ async function handleAction(button) {
       const workflow =
         mode === "dry-run"
           ? "sequential"
-          : document.querySelector("#runWorkflow")?.value || "hybrid-tabs";
+          : document.querySelector("#runWorkflow")?.value || "hybrid-windows";
       const tabLimitValue = document.querySelector("#runTabLimit")?.value;
-      const tabLimit = tabLimitValue === "0" ? 0 : Number(tabLimitValue || 3);
+      const tabLimit =
+        workflow === "hybrid-windows"
+          ? Number(tabLimitValue || 30)
+          : tabLimitValue === "0"
+            ? 0
+            : Number(tabLimitValue || 3);
       if (!draftId) throw new Error("กรุณาเลือก Draft");
       const draftLabel =
         draftSelect?.selectedOptions?.[0]?.textContent?.trim() || "Draft ที่เลือก";
@@ -1842,8 +1910,8 @@ async function handleAction(button) {
         body: JSON.stringify({
           draftId: sourceRun.draftId,
           mode: "assisted",
-          workflow: "hybrid-tabs",
-          tabLimit: 0,
+          workflow: "hybrid-windows",
+          tabLimit: 30,
           groupIds,
         }),
       });
@@ -1864,8 +1932,8 @@ async function handleAction(button) {
         body: JSON.stringify({
           draftId: sourceRun.draftId,
           mode: "assisted",
-          workflow: "hybrid-tabs",
-          tabLimit: 0,
+          workflow: "hybrid-windows",
+          tabLimit: 30,
           groupIds,
         }),
       });
@@ -1906,28 +1974,40 @@ async function handleAction(button) {
       render();
       toast("ลบทั้งคิวแล้ว สามารถเลือกกลุ่มเดิมทั้งหมดและสร้างคิวโพสต์ใหม่ได้");
     } else if (action === "start-run") {
+      const sourceRun = state.runs.find((run) => run.id === button.dataset.id);
       await api(`/api/runs/${button.dataset.id}/start`, { method: "POST" });
-      toast("เริ่มคิวแล้ว ระบบจะเปิดแท็บ Facebook ใหม่ตามรูปแบบของคิว");
+      toast(
+        sourceRun?.workflow === "hybrid-windows"
+          ? `เริ่มคิวแล้ว ระบบจะแบ่งสูงสุด ${sourceRun.tabLimit || 30} แท็บต่อหน้าต่าง และจะไม่ปิดแท็บเอง`
+          : "เริ่มคิวแล้ว ระบบจะเปิดแท็บ Facebook ใหม่ตามรูปแบบของคิว",
+      );
       await refreshAll();
       render();
     } else if (action === "switch-workflow") {
       const workflow = button.dataset.workflow;
       await api(`/api/runs/${button.dataset.id}/workflow`, {
         method: "POST",
-        body: JSON.stringify({ workflow, tabLimit: 0 }),
+        body: JSON.stringify({
+          workflow,
+          tabLimit: workflow === "hybrid-windows" ? 30 : 0,
+        }),
       });
       await refreshAll();
       render();
       toast(
-        workflow === "hybrid-tabs"
-          ? "เปลี่ยนเป็น Hybrid แบบเปิดทุกกลุ่มพร้อมกันแล้ว"
+        workflow === "hybrid-windows"
+          ? "เปลี่ยนเป็นหลายหน้าต่าง สูงสุด 30 แท็บต่อหน้าต่าง และไม่ปิดแท็บเองแล้ว"
           : "เปลี่ยนเป็นแบบทีละกลุ่มแล้ว",
       );
     } else if (action === "pause-run" || action === "resume-run" || action === "stop-run") {
       const endpoint = action.split("-")[0];
+      const sourceRun = state.runs.find((run) => run.id === button.dataset.id);
       await api(`/api/runs/${button.dataset.id}/${endpoint}`, { method: "POST" });
       await refreshAll();
       render();
+      if (action === "stop-run" && sourceRun?.workflow === "hybrid-windows") {
+        toast("หยุดคิวแล้ว แท็บและหน้าต่าง Facebook ยังคงเปิดอยู่ คุณเป็นผู้ปิดเอง");
+      }
     } else if (action === "target-action") {
       if (button.dataset.value === "confirm") {
         const accepted = window.confirm(
@@ -1949,12 +2029,17 @@ async function handleAction(button) {
         method: "POST",
         body: JSON.stringify({ action: button.dataset.value, reason }),
       });
+      const sourceRun = state.runs.find((run) => run.id === button.dataset.run);
+      const keepOpenMessage =
+        sourceRun?.workflow === "hybrid-windows"
+          ? " แท็บจะยังเปิดอยู่จนกว่าคุณจะปิดเอง"
+          : "";
       toast(
         button.dataset.value === "confirm"
-          ? "ระบบกด Post แล้วและกำลังเก็บหลักฐาน"
+          ? `ระบบกด Post แล้วและกำลังเก็บหลักฐาน${keepOpenMessage}`
           : button.dataset.value === "mark-posted"
-            ? "บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานเรียบร้อย"
-            : "ข้ามกลุ่มนี้พร้อมเก็บหลักฐานแล้ว",
+            ? `บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานเรียบร้อย${keepOpenMessage}`
+            : `ข้ามกลุ่มนี้พร้อมเก็บหลักฐานแล้ว${keepOpenMessage}`,
       );
       window.setTimeout(pollAndRender, 1000);
     } else if (action === "focus-target") {

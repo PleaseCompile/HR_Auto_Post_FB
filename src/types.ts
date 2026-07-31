@@ -1,7 +1,7 @@
 export type Slot = "morning" | "midday" | "evening";
 export type DraftStatus = "draft" | "ready" | "archived";
 export type RunMode = "assisted" | "dry-run";
-export type RunWorkflow = "sequential" | "hybrid-tabs";
+export type RunWorkflow = "sequential" | "hybrid-tabs" | "hybrid-windows";
 
 export type TargetStatus =
   | "queued"
