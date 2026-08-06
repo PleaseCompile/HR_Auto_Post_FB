@@ -284,12 +284,21 @@ try {
       throw new Error("Assisted mode should be the default queue mode");
     }
     if (
-      (await page.locator("#runWorkflow").inputValue()) !== "hybrid-windows" ||
-      (await page.locator("#runTabLimit").inputValue()) !== "30"
+      (await page.locator("#runWorkflow").inputValue()) !== "hybrid-tabs" ||
+      (await page.locator("#runTabLimit").inputValue()) !== "10"
     ) {
-      throw new Error("Windowed workflow with 30 tabs per window should be the default");
+      throw new Error("Sliding Hybrid with 10 prepared tabs should be the default");
     }
-    await page.getByText(/1 กลุ่ม → 1 หน้าต่าง \(1 แท็บ\)/).waitFor();
+    await page.locator("#runTabLimit").selectOption("50");
+    if ((await page.locator("#runTabLimit").inputValue()) !== "50") {
+      throw new Error("Custom tab limit 50 was not selected");
+    }
+    await page.locator("#runTabLimit").selectOption("10");
+    await page.locator("#runAutoConfirm").check();
+    if (!(await page.locator("#runAutoConfirm").isChecked())) {
+      throw new Error("AutoConfirm checkbox was not checked");
+    }
+    await page.locator("#runAutoConfirm").uncheck();
     await page.locator("#runMode").selectOption("dry-run");
     await page.getByRole("button", { name: "สร้างคิวโพสต์" }).click();
     await page.getByRole("heading", { name: "คิวและการทำงาน" }).waitFor();
@@ -402,6 +411,46 @@ try {
           group: { ...seedGroup, id: "third-group", name: "Manual mock group" },
         },
       ],
+    },
+    {
+      id: "mock-bulk-run",
+      draftId: seedDraft.id,
+      mode: "assisted",
+      workflow: "hybrid-tabs",
+      tabLimit: 3,
+      status: "running",
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      createdAt: new Date().toISOString(),
+      draft: {
+        id: seedDraft.id,
+        workDate: "2026-07-23",
+        slot: "morning",
+        text: "Bulk and shortcut mock run",
+        status: "draft",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        media: [],
+      },
+      targets: [1, 2, 3].map((index) => ({
+        id: `mock-bulk-target-${index}`,
+        runId: "mock-bulk-run",
+        groupId: `mock-bulk-group-${index}`,
+        position: index - 1,
+        status: "awaiting_confirmation",
+        message: "รอยืนยัน",
+        evidencePath: null,
+        permalink: null,
+        updatedAt: "2026-07-23T11:00:00.000Z",
+        group: {
+          ...seedGroup,
+          id: `mock-bulk-group-${index}`,
+          name:
+            index === 3
+              ? "Triple click shortcut group"
+              : `Bulk shortcut group ${index}`,
+        },
+      })),
     },
     {
       id: "mock-dry-run",
@@ -547,6 +596,49 @@ try {
     }
     await route.fulfill({ json: { ok: true } });
   });
+  let bulkMarkedTargetIds = [];
+  let tripleClickActionCount = 0;
+  await page.route(`${baseUrl}/api/runs/mock-bulk-run/**`, async (route) => {
+    const url = route.request().url();
+    const bulkRun = mockedRuns.find((run) => run.id === "mock-bulk-run");
+    if (!bulkRun) throw new Error("Bulk mock run is missing");
+    if (url.endsWith("/targets/mark-posted-bulk")) {
+      const payload = route.request().postDataJSON();
+      bulkMarkedTargetIds = payload.targetIds;
+      for (const targetId of bulkMarkedTargetIds) {
+        const target = bulkRun.targets.find((item) => item.id === targetId);
+        if (target) {
+          target.status = "published";
+          target.message = "ผู้ใช้ยืนยันว่าโพสต์เองใน Facebook และระบบเก็บหลักฐานแล้ว";
+        }
+      }
+      await route.fulfill({
+        json: {
+          total: bulkMarkedTargetIds.length,
+          succeeded: bulkMarkedTargetIds.length,
+          failed: 0,
+          results: bulkMarkedTargetIds.map((targetId) => ({
+            targetId,
+            ok: true,
+            status: "published",
+            message: "บันทึกสำเร็จ",
+          })),
+        },
+      });
+      return;
+    }
+    if (url.includes("mock-bulk-target-3") && url.endsWith("/action")) {
+      tripleClickActionCount += 1;
+      const target = bulkRun.targets.find(
+        (item) => item.id === "mock-bulk-target-3",
+      );
+      target.status = "published";
+      target.message = "ผู้ใช้ยืนยันว่าโพสต์เองใน Facebook และระบบเก็บหลักฐานแล้ว";
+      bulkRun.status = "completed";
+      bulkRun.finishedAt = new Date().toISOString();
+    }
+    await route.fulfill({ json: { ok: true } });
+  });
   await page.route(`${baseUrl}/api/runs/mock-recovery-run`, async (route) => {
     if (route.request().method() === "DELETE") {
       deletedPostedRunPayload = route.request().postDataJSON();
@@ -607,6 +699,47 @@ try {
     ) {
       throw new Error(
         `Run or target status color class was not applied: ${JSON.stringify({ runClasses, attentionTarget })}`,
+      );
+    }
+  });
+  await check("Runs: bulk record manually posted targets", async () => {
+    const bulkCard = page
+      .locator(".run-card")
+      .filter({ hasText: "Bulk shortcut group 1" });
+    await bulkCard
+      .locator('.target-bulk-check[data-target="mock-bulk-target-1"]')
+      .check();
+    await bulkCard
+      .locator('.target-bulk-check[data-target="mock-bulk-target-2"]')
+      .check();
+    page.once("dialog", (dialog) => dialog.accept());
+    await bulkCard
+      .getByRole("button", { name: "ฉันโพสต์เองแล้วที่เลือก (2)" })
+      .click();
+    await page
+      .getByText("บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานครบ 2 รายการ")
+      .waitFor();
+    if (
+      bulkMarkedTargetIds.join(",") !==
+      "mock-bulk-target-1,mock-bulk-target-2"
+    ) {
+      throw new Error(
+        `Bulk marked targets were incorrect: ${bulkMarkedTargetIds.join(",")}`,
+      );
+    }
+  });
+  await check("Runs: triple-click manually posted shortcut", async () => {
+    const shortcutButton = page
+      .locator(".target-row")
+      .filter({ hasText: "Triple click shortcut group" })
+      .getByRole("button", { name: "ฉันโพสต์เองแล้ว" });
+    await shortcutButton.click({ clickCount: 3, delay: 80 });
+    await page
+      .getByText("ทางลัด 3 คลิก · บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานเรียบร้อย")
+      .waitFor();
+    if (tripleClickActionCount !== 1) {
+      throw new Error(
+        `Triple-click shortcut sent ${tripleClickActionCount} actions instead of one`,
       );
     }
   });
@@ -710,6 +843,9 @@ try {
     await page.getByText("หยุดแล้ว").waitFor();
   });
 
+  mockedRuns = mockedRuns.filter((run) => run.id !== "mock-bulk-run");
+  await page.getByRole("button", { name: "รีเฟรชสถานะ" }).click();
+  await page.getByText("อัปเดตสถานะแล้ว").waitFor();
   await navigate("history", "หลักฐานการโพสต์");
   await check("History filters: recommended grouped view", async () => {
     await page.locator(".evidence-filter-panel").waitFor();

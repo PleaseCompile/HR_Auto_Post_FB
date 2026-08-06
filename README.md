@@ -42,9 +42,13 @@ chmod +x scripts/start-linux.sh
 - Dry run เพื่อตรวจกลุ่มโดยไม่ส่งโพสต์
 - Assisted แบบทีละกลุ่ม
 - หลายหน้าต่าง Chrome ภายใต้ Facebook Profile เดียว แบ่งสูงสุด 30 แท็บต่อหน้าต่าง และไม่ปิดแท็บเอง
-- Hybrid หลายแท็บแบบเดิม สำหรับเปิดในหน้าต่างเดียวและกำหนดเพดานพร้อมกันเอง
+- Hybrid แบบเติมต่อเนื่อง ค่าเริ่มต้น 10 แท็บ เมื่อจัดการหนึ่งแท็บระบบจะเตรียมกลุ่มถัดไป และพักอัตโนมัติเมื่อ RAM เหลือน้อย
+- ล็อกเจ้าของ Browser Profile ป้องกัน HR Auto หลายโปรเซสเปิด Session ชนกัน
+- บันทึก Browser crash, page error และ document network failure ไว้ใน `data/browser-events.jsonl`
 - หยุดรอให้ผู้ใช้ยืนยันก่อนกด Post
 - ระบุว่าโพสต์เองแล้ว หรือข้ามพร้อมเก็บหลักฐาน
+- เลือกหลายกลุ่มแล้วบันทึก `ฉันโพสต์เองแล้ว` พร้อมกัน ระบบเก็บหลักฐานตามลำดับและยืนยันรวมเพียงครั้งเดียว
+- ทางลัดคลิก `ฉันโพสต์เองแล้ว` 3 ครั้งติดกันเพื่อบันทึกทันทีโดยไม่เปิดกล่องยืนยัน
 - ลบคิวทีละใบ หรือใช้ `ล้างคิวเดิมทั้งหมดและสร้างใหม่` เพื่อล้างทุก Run ของ Draft เดียวกันและสร้างคิวทดแทนในครั้งเดียว
 - อัปโหลด แก้หมายเหตุ เปลี่ยนรูป และลบหลักฐานที่เพิ่มเอง
 - คลังหลักฐานพร้อมตัวกรองวันที่ รอบ ช่วงเวลา กลุ่ม สถานะ และที่มา
@@ -56,6 +60,7 @@ chmod +x scripts/start-linux.sh
 
 | ต้องการทำอะไร | คู่มือ |
 |---|---|
+| อัปเดตโปรแกรมเป็นเวอร์ชันใหม่ | [UPDATE-GUIDE-TH.md](docs/UPDATE-GUIDE-TH.md) |
 | ติดตั้งบน Windows | [INSTALL-WINDOWS-TH.md](docs/INSTALL-WINDOWS-TH.md) |
 | ติดตั้งบน Linux | [INSTALL-LINUX-TH.md](docs/INSTALL-LINUX-TH.md) |
 | เรียนรู้ขั้นตอนใช้งาน | [USER-GUIDE-TH.md](docs/USER-GUIDE-TH.md) |
@@ -80,7 +85,9 @@ data/
 ├── uploads/             รูปของ Draft
 ├── evidence/            หลักฐานจากระบบและที่อัปโหลดเอง
 ├── group-scans/         JSON จาก Automatic Group Scan
-└── browser-profile/     Facebook Browser Session
+├── browser-profile/     Facebook Browser Session
+├── browser-session.lock เจ้าของ Profile ขณะ Browser เปิด
+└── browser-events.jsonl เหตุการณ์ Browser สำหรับวิเคราะห์ปัญหา
 ```
 
 ห้ามส่ง `data/browser-profile/`, `.env`, ฐานข้อมูล หรือหลักฐานขึ้น GitHub พื้นที่เหล่านี้ถูกกำหนดไว้ใน `.gitignore` แล้ว แต่ควรตรวจด้วย `git status` ทุกครั้งก่อน commit

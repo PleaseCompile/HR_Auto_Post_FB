@@ -129,6 +129,7 @@ ensureColumn("groups_list", "external_id", "TEXT");
 ensureColumn("groups_list", "scanned_at", "TEXT");
 ensureColumn("runs", "workflow", "TEXT NOT NULL DEFAULT 'sequential'");
 ensureColumn("runs", "tab_limit", "INTEGER NOT NULL DEFAULT 3");
+ensureColumn("runs", "auto_confirm", "INTEGER NOT NULL DEFAULT 0");
 db.exec("CREATE INDEX IF NOT EXISTS idx_groups_external_id ON groups_list(external_id)");
 db.prepare(
   `UPDATE group_scan_runs
@@ -280,9 +281,12 @@ function rowToRun(row: any, expanded = false): RunRecord {
     tabLimit:
       workflow === "hybrid-windows"
         ? Math.min(30, Math.max(1, Math.round(rawTabLimit || 30)))
-        : rawTabLimit === 0
-          ? 0
-          : Math.max(1, Math.round(rawTabLimit || 3)),
+        : workflow === "hybrid-tabs"
+          ? Math.min(250, Math.max(1, Math.round(rawTabLimit || 10)))
+          : rawTabLimit === 0
+            ? 0
+            : Math.max(1, Math.round(rawTabLimit || 3)),
+    autoConfirm: Boolean(row.auto_confirm),
     status: row.status,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -590,6 +594,7 @@ type RunCreationInput = {
   mode: RunMode;
   workflow?: RunWorkflow;
   tabLimit?: number;
+  autoConfirm?: boolean;
 };
 
 type RunDeletionOptions = {
@@ -597,14 +602,17 @@ type RunDeletionOptions = {
   acknowledgedPosted?: boolean;
 };
 
+const MAX_HYBRID_TABS_LIMIT = Number(process.env.HR_AUTO_MAX_HYBRID_TABS_LIMIT || 250);
+
 function normalizeRunTabLimit(input: RunCreationInput): number {
   if (input.mode === "dry-run" || input.workflow === "sequential") return 0;
   if (input.workflow === "hybrid-windows") {
     return Math.min(30, Math.max(1, Math.round(input.tabLimit || 30)));
   }
-  return input.tabLimit === undefined || input.tabLimit === 0
-    ? 0
-    : Math.max(1, Math.round(input.tabLimit));
+  if (input.workflow === "hybrid-tabs") {
+    return Math.min(MAX_HYBRID_TABS_LIMIT, Math.max(1, Math.round(input.tabLimit || 10)));
+  }
+  return 0;
 }
 
 function insertRun(input: RunCreationInput): RunRecord {
@@ -613,16 +621,17 @@ function insertRun(input: RunCreationInput): RunRecord {
   const now = new Date().toISOString();
   const workflow = input.mode === "dry-run" ? "sequential" : input.workflow || "sequential";
   const tabLimit = normalizeRunTabLimit(input);
+  const autoConfirm = Number(Boolean(input.autoConfirm));
   const insertRunStatement = db.prepare(
-    `INSERT INTO runs(id, draft_id, mode, workflow, tab_limit, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'queued', ?)`,
+    `INSERT INTO runs(id, draft_id, mode, workflow, tab_limit, auto_confirm, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)`,
   );
   const insertTargetStatement = db.prepare(
     `INSERT INTO run_targets(id, run_id, group_id, position, status, updated_at)
      VALUES (?, ?, ?, ?, 'queued', ?)`,
   );
   const executeInsert = () => {
-    insertRunStatement.run(id, input.draftId, input.mode, workflow, tabLimit, now);
+    insertRunStatement.run(id, input.draftId, input.mode, workflow, tabLimit, autoConfirm, now);
     uniqueGroupIds.forEach((groupId, position) => {
       insertTargetStatement.run(randomUUID(), id, groupId, position, now);
     });
@@ -824,9 +833,9 @@ export function updateRunWorkflow(
     workflow,
     workflow === "hybrid-windows"
       ? Math.min(30, Math.max(1, Math.round(tabLimit || 30)))
-      : workflow === "sequential" || tabLimit === 0
-        ? 0
-        : Math.max(1, Math.round(tabLimit)),
+      : workflow === "hybrid-tabs"
+        ? Math.min(MAX_HYBRID_TABS_LIMIT, Math.max(1, Math.round(tabLimit || 10)))
+        : 0,
     id,
   );
   return getRun(id);

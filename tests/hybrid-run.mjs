@@ -6,6 +6,7 @@ import { chromium } from "playwright";
 const dataDirectory = path.resolve("test-results", `hybrid-${Date.now()}`);
 fs.mkdirSync(dataDirectory, { recursive: true });
 process.env.HR_AUTO_DATA_DIR = dataDirectory;
+process.env.HR_AUTO_PREPARE_DELAY_MS = "0";
 
 const mockServer = http.createServer((_request, response) => {
   response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -99,6 +100,28 @@ try {
     throw new Error(`Expected exactly 2 prepared tabs, got ${context.pages().length}`);
   }
 
+  const blockedDraft = createDraft({
+    workDate: "2026-07-23",
+    slot: "evening",
+    text: "Concurrent run guard test",
+  });
+  const blockedRun = createRun({
+    draftId: blockedDraft.id,
+    groupIds: [groups[0].id],
+    mode: "assisted",
+    workflow: "hybrid-tabs",
+    tabLimit: 1,
+  });
+  let concurrentRunWasBlocked = false;
+  try {
+    runManager.start(blockedRun.id);
+  } catch (error) {
+    concurrentRunWasBlocked = String(error).includes("มีคิวอื่นกำลังควบคุม");
+  }
+  if (!concurrentRunWasBlocked) {
+    throw new Error("A second queue was allowed to control the same browser session");
+  }
+
   const [first, second] = firstWindow.targets;
   await runManager.focusTarget(run.id, first.id);
   await runManager.action(run.id, first.id, "skip", "กลุ่มไม่ตรงพื้นที่");
@@ -140,41 +163,124 @@ try {
     throw new Error("Resolved hybrid tabs should be closed");
   }
 
-  const unlimitedDraft = createDraft({
+  const safeDraft = createDraft({
     workDate: "2026-07-23",
     slot: "midday",
-    text: "Unlimited hybrid state machine test",
+    text: "Safe sliding-window Hybrid state machine test",
   });
-  const unlimitedRun = createRun({
-    draftId: unlimitedDraft.id,
-    groupIds: groups.map((group) => group.id),
+  const slidingGroups = Array.from({ length: 12 }, (_, index) =>
+    upsertGroup({
+      name: `Sliding Hybrid group ${index + 1}`,
+      url: `http://127.0.0.1:${address.port}/sliding-group-${index + 1}`,
+    }),
+  );
+  const safeRun = createRun({
+    draftId: safeDraft.id,
+    groupIds: slidingGroups.map((group) => group.id),
     mode: "assisted",
     workflow: "hybrid-tabs",
     tabLimit: 0,
   });
-  runManager.start(unlimitedRun.id);
-  const allPrepared = await waitFor(() => {
-    const current = getRun(unlimitedRun.id);
+  if (safeRun.tabLimit !== 10) {
+    throw new Error(`Hybrid tab limit 0 should normalize to 10, got ${safeRun.tabLimit}`);
+  }
+  runManager.start(safeRun.id);
+  const firstSafeWindow = await waitFor(() => {
+    const current = getRun(safeRun.id);
     const awaiting = current?.targets?.filter(
       (target) => target.status === "awaiting_confirmation",
     );
-    return awaiting?.length === groups.length ? current : null;
-  }, "Unlimited Hybrid did not prepare every selected group");
+    const queued = current?.targets?.filter((target) => target.status === "queued");
+    return awaiting?.length === 10 && queued?.length === 2 ? current : null;
+  }, "Safe Hybrid did not stop at its ten-tab sliding window", 45_000);
 
-  if (context.pages().length !== groups.length) {
+  if (context.pages().length !== 10) {
     throw new Error(
-      `Unlimited Hybrid expected ${groups.length} tabs, got ${context.pages().length}`,
+      `Safe Hybrid expected 10 tabs, got ${context.pages().length}`,
     );
   }
-  for (const target of allPrepared.targets) {
-    await runManager.action(unlimitedRun.id, target.id, "skip", "unlimited test");
+  await runManager.action(
+    safeRun.id,
+    firstSafeWindow.targets[0].id,
+    "skip",
+    "sliding refill test",
+  );
+  const refilledSafeWindow = await waitFor(() => {
+    const current = getRun(safeRun.id);
+    const awaiting = current?.targets?.filter(
+      (target) => target.status === "awaiting_confirmation",
+    );
+    const queued = current?.targets?.filter((target) => target.status === "queued");
+    return awaiting?.length === 10 && queued?.length === 1 ? current : null;
+  }, "Safe Hybrid did not refill the released tab");
+  for (const target of refilledSafeWindow.targets.filter(
+    (target) => target.status === "awaiting_confirmation",
+  )) {
+    await runManager.action(safeRun.id, target.id, "skip", "safe sliding test");
   }
+  const finalPrepared = await waitFor(() => {
+    const current = getRun(safeRun.id);
+    return current?.targets?.find(
+      (target) => target.status === "awaiting_confirmation",
+    );
+  }, "Safe Hybrid did not prepare its final queued group");
+  await runManager.action(safeRun.id, finalPrepared.id, "skip", "safe final test");
   await waitFor(
-    () => getRun(unlimitedRun.id)?.status === "completed",
-    "Unlimited Hybrid did not complete after resolving every tab",
+    () => getRun(safeRun.id)?.status === "completed",
+    "Safe Hybrid did not complete after resolving every tab",
   );
   if (context.pages().length !== 0) {
-    throw new Error("Unlimited Hybrid tabs should close after being resolved");
+    throw new Error("Safe Hybrid tabs should close after being resolved");
+  }
+
+  const bulkDraft = createDraft({
+    workDate: "2026-07-23",
+    slot: "evening",
+    text: "Bulk manually posted test",
+  });
+  const bulkRun = createRun({
+    draftId: bulkDraft.id,
+    groupIds: groups.slice(0, 2).map((group) => group.id),
+    mode: "assisted",
+    workflow: "hybrid-tabs",
+    tabLimit: 2,
+  });
+  runManager.start(bulkRun.id);
+  const bulkPrepared = await waitFor(() => {
+    const current = getRun(bulkRun.id);
+    return current?.targets?.every(
+      (target) => target.status === "awaiting_confirmation",
+    )
+      ? current
+      : null;
+  }, "Bulk test targets were not prepared");
+  const bulkResult = await runManager.markPostedBulk(
+    bulkRun.id,
+    bulkPrepared.targets.map((target) => target.id),
+  );
+  if (
+    bulkResult.succeeded !== 2 ||
+    bulkResult.failed !== 0 ||
+    bulkResult.results.some((result) => !result.ok)
+  ) {
+    throw new Error(`Bulk manually posted result was incorrect: ${JSON.stringify(bulkResult)}`);
+  }
+  const bulkFinished = await waitFor(
+    () => getRun(bulkRun.id)?.status === "completed" && getRun(bulkRun.id),
+    "Bulk manually posted run did not complete",
+  );
+  if (
+    bulkFinished.targets.some(
+      (target) =>
+        target.status !== "published" ||
+        !target.evidencePath ||
+        !fs.existsSync(target.evidencePath),
+    )
+  ) {
+    throw new Error("Bulk manually posted targets did not retain published evidence");
+  }
+  if (context.pages().length !== 0) {
+    throw new Error("Bulk manually posted tabs should close after capture");
   }
   console.log("Hybrid run state-machine test passed");
 } finally {

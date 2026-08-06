@@ -14,6 +14,8 @@ export const evidenceDirectory = path.join(dataDirectory, "evidence");
 export const manualEvidenceDirectory = path.join(evidenceDirectory, "manual");
 export const groupScanDirectory = path.join(dataDirectory, "group-scans");
 export const browserProfileDirectory = path.join(dataDirectory, "browser-profile");
+export const browserSessionLockPath = path.join(dataDirectory, "browser-session.lock");
+export const browserEventLogPath = path.join(dataDirectory, "browser-events.jsonl");
 export const port = Number(process.env.PORT || 4173);
 export const timezone = process.env.HR_AUTO_TIMEZONE || "Asia/Bangkok";
 

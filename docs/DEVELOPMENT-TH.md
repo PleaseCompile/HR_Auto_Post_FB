@@ -96,7 +96,7 @@ Smoke tests บางส่วนอาจเปิด Server หรือ Brows
 - `tests/windowed-run.mjs`
 - `npm run test:window-session` สำหรับตรวจ Window ID จริง (เปิด Chromium ชั่วคราว)
 - 1, 3 และหลายกลุ่ม
-- Hybrid แบบเดิม: tabLimit 0 และค่าจำกัด
+- Hybrid แบบเติมต่อเนื่อง: ค่าเริ่มต้น 10, sliding window และค่าจำกัด 4–30
 - หลายหน้าต่าง: 30 + 30 + ส่วนที่เหลือ, ปฏิเสธค่ามากกว่า 30
 - pause/resume/stop
 - ปิดแท็บระหว่าง awaiting confirmation

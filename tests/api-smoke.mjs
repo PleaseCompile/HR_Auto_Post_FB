@@ -176,6 +176,26 @@ try {
     throw new Error("Windowed workflow did not reject more than 30 tabs");
   }
 
+  const customHybridRun = await jsonRequest("/api/runs", {
+    method: "POST",
+    body: JSON.stringify({
+      draftId: draft.id,
+      groupIds: [windowedGroup.id],
+      mode: "assisted",
+      workflow: "hybrid-tabs",
+      tabLimit: 50,
+      autoConfirm: true,
+    }),
+  });
+  const savedCustomRun = await jsonRequest(`/api/runs/${customHybridRun.id}`);
+  if (
+    savedCustomRun.workflow !== "hybrid-tabs" ||
+    savedCustomRun.tabLimit !== 50 ||
+    savedCustomRun.autoConfirm !== true
+  ) {
+    throw new Error("Hybrid-tabs custom tabLimit 50 and autoConfirm true were not saved");
+  }
+
   const targetId = saved.targets[0].id;
   const evidenceForm = new FormData();
   evidenceForm.append(

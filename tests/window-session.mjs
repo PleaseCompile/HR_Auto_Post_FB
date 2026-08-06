@@ -31,7 +31,31 @@ async function browserWindowId(page) {
 }
 
 try {
+  const lockPath = path.join(dataDirectory, "browser-session.lock");
+  fs.writeFileSync(
+    lockPath,
+    JSON.stringify({
+      pid: process.ppid,
+      startedAt: new Date().toISOString(),
+      profile: path.join(dataDirectory, "browser-profile"),
+    }),
+  );
+  let lockWasEnforced = false;
+  try {
+    await browserSession.launch();
+  } catch (error) {
+    lockWasEnforced = String(error).includes(`PID ${process.ppid}`);
+  }
+  if (!lockWasEnforced) {
+    throw new Error("Browser profile ownership lock did not block another live process");
+  }
+  fs.rmSync(lockPath, { force: true });
+
   await browserSession.launch();
+  const status = await browserSession.status();
+  if (!status.browserOpen || status.ownerPid !== process.pid || !status.profileLocked) {
+    throw new Error("Browser session health did not expose its profile owner");
+  }
   const firstWindow = await browserSession.newWindow();
   const firstWindowSecondTab = await browserSession.newPageInWindow(firstWindow);
   const secondWindow = await browserSession.newWindow();
@@ -48,5 +72,13 @@ try {
   console.log("Browser window and same-window tab control test passed");
 } finally {
   await browserSession.close();
+  if (fs.existsSync(path.join(dataDirectory, "browser-session.lock"))) {
+    throw new Error("Browser profile ownership lock was not released on close");
+  }
+  const eventLogPath = path.join(dataDirectory, "browser-events.jsonl");
+  const eventLog = fs.readFileSync(eventLogPath, "utf8");
+  if (!eventLog.includes('"event":"session_launched"') || !eventLog.includes('"event":"context_closed"')) {
+    throw new Error("Browser session lifecycle was not written to the event log");
+  }
   mockServer.close();
 }

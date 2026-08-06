@@ -71,7 +71,15 @@ const evidenceUpload = multer({
 });
 
 app.use(express.json({ limit: "2mb" }));
-app.use(express.static(publicDirectory));
+app.use(
+  express.static(publicDirectory, {
+    setHeaders(response, filePath) {
+      if (/\.(?:html|js|css)$/i.test(filePath)) {
+        response.setHeader("Cache-Control", "no-store, max-age=0");
+      }
+    },
+  }),
+);
 
 const draftSchema = z.object({
   workDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -183,6 +191,12 @@ app.post("/api/session/connect", asyncRoute(async (_request, response) => {
 }));
 
 app.post("/api/session/close", asyncRoute(async (_request, response) => {
+  if (runManager.isBusy()) {
+    response.status(409).json({
+      error: "ยังมีคิวกำลังทำงาน กรุณาหยุดคิวก่อนปิด Facebook Browser",
+    });
+    return;
+  }
   await browserSession.close();
   response.json({ ok: true });
 }));
@@ -366,10 +380,14 @@ app.post("/api/runs", (request, response) => {
       mode: z.enum(["assisted", "dry-run"]),
       workflow: z.enum(["sequential", "hybrid-tabs", "hybrid-windows"]).optional(),
       tabLimit: z.number().int().min(0).max(250).optional(),
+      autoConfirm: z.boolean().optional().default(false),
     })
     .parse(request.body);
-  if (input.workflow === "hybrid-windows" && (input.tabLimit || 30) > 30) {
-    return response.status(400).json({ error: "โหมดหลายหน้าต่างกำหนดได้สูงสุด 30 แท็บต่อหน้าต่าง" });
+  if (
+    input.workflow === "hybrid-windows" &&
+    (input.tabLimit || 30) > 30
+  ) {
+    return response.status(400).json({ error: "โหมด Hybrid Windows กำหนดได้สูงสุด 30 แท็บ" });
   }
   if (!getDraft(input.draftId)) return response.status(404).json({ error: "ไม่พบ Draft" });
   response.status(201).json(createRun(input));
@@ -383,12 +401,16 @@ app.post("/api/runs/restart-draft", (request, response) => {
       mode: z.enum(["assisted", "dry-run"]),
       workflow: z.enum(["sequential", "hybrid-tabs", "hybrid-windows"]).optional(),
       tabLimit: z.number().int().min(0).max(250).optional(),
+      autoConfirm: z.boolean().optional().default(false),
       acknowledgedUncertain: z.boolean(),
       acknowledgedPosted: z.boolean(),
     })
     .parse(request.body);
-  if (input.workflow === "hybrid-windows" && (input.tabLimit || 30) > 30) {
-    return response.status(400).json({ error: "โหมดหลายหน้าต่างกำหนดได้สูงสุด 30 แท็บต่อหน้าต่าง" });
+  if (
+    input.workflow === "hybrid-windows" &&
+    (input.tabLimit || 30) > 30
+  ) {
+    return response.status(400).json({ error: "โหมด Hybrid Windows กำหนดได้สูงสุด 30 แท็บ" });
   }
   if (!getDraft(input.draftId)) {
     return response.status(404).json({ error: "ไม่พบ Draft" });
@@ -405,6 +427,7 @@ app.post("/api/runs/restart-draft", (request, response) => {
       mode: input.mode,
       workflow: input.workflow,
       tabLimit: input.tabLimit,
+      autoConfirm: input.autoConfirm,
     },
     {
       acknowledgedUncertain: input.acknowledgedUncertain,
@@ -437,8 +460,11 @@ app.post("/api/runs/:id/workflow", (request, response) => {
       tabLimit: z.number().int().min(0).max(250).default(0),
     })
     .parse(request.body);
-  if (input.workflow === "hybrid-windows" && (input.tabLimit || 30) > 30) {
-    return response.status(400).json({ error: "โหมดหลายหน้าต่างกำหนดได้สูงสุด 30 แท็บต่อหน้าต่าง" });
+  if (
+    input.workflow === "hybrid-windows" &&
+    (input.tabLimit || 30) > 30
+  ) {
+    return response.status(400).json({ error: "โหมด Hybrid Windows กำหนดได้สูงสุด 30 แท็บ" });
   }
   const run = updateRunWorkflow(
     String(request.params.id),
@@ -463,6 +489,19 @@ app.post("/api/runs/:id/stop", (request, response) => {
   runManager.stop(String(request.params.id));
   response.json({ ok: true });
 });
+
+app.post("/api/runs/:runId/targets/mark-posted-bulk", asyncRoute(async (request, response) => {
+  const input = z
+    .object({
+      targetIds: z.array(z.string().uuid()).min(1).max(50),
+    })
+    .parse(request.body);
+  const result = await runManager.markPostedBulk(
+    String(request.params.runId),
+    input.targetIds,
+  );
+  response.json(result);
+}));
 
 app.post("/api/runs/:runId/targets/:targetId/action", asyncRoute(async (request, response) => {
   const input = z
@@ -630,7 +669,14 @@ app.delete("/api/manual-evidence/:id", (request, response) => {
   response.json({ ok: true });
 });
 
+app.use("/api", (_request, response) => {
+  response.status(404).json({
+    error: "ไม่พบ API ที่เรียกใช้ กรุณารีสตาร์ต HR Auto หากเพิ่งอัปเดตโปรแกรม",
+  });
+});
+
 app.use((_request, response) => {
+  response.setHeader("Cache-Control", "no-store, max-age=0");
   response.sendFile(path.join(publicDirectory, "index.html"));
 });
 

@@ -197,12 +197,25 @@ sudo HTTPS_PROXY="$HTTPS_PROXY" npx playwright install-deps chromium
 
 วิธีแก้:
 
-1. ปิด HR Auto
-2. ปิด Chromium ที่ HR Auto เปิด
-3. ตรวจ Task Manager หรือ `ps`
-4. เปิดระบบใหม่
+1. ตรวจหน้า `ตั้งค่าและ Session` ระบบจะแสดง PID ที่ถือ Profile หากเป็น HR Auto อีกหน้าต่าง
+2. กลับไปหน้าต่าง HR Auto นั้นและกด `ปิด Browser`
+3. หากโปรแกรมเดิมปิดผิดปกติ ให้ปิดเฉพาะ Chromium ที่ใช้ `data/browser-profile` แล้วเปิด HR Auto ใหม่
+4. ระบบจะล้าง `data/browser-session.lock` เองเมื่อ PID เจ้าของไม่ทำงานแล้ว
+5. ห้ามเปิดสองคิวหรือสอง HR Auto พร้อมกันกับ Data Directory เดียวกัน
 
 อย่าลบไฟล์ lock แบบสุ่มขณะที่ Chromium ยังทำงาน และอย่าลบทั้ง `browser-profile` ก่อน Backup
+
+## Chromium หน้าขาวหรือแท็บหยุดทำงาน
+
+1. หยุดเติมงานใหม่และจัดการแท็บที่ยังตอบสนองให้เสร็จ
+2. เปิดหน้า `ตั้งค่าและ Session` ตรวจจำนวน Renderer crash, Page/Web error และข้อความเหตุการณ์ล่าสุด
+3. เปิด `data/browser-events.jsonl` แล้วค้นหา `page_crashed`, `context_closed_unexpectedly` หรือ `document_request_failed`
+4. ใช้ Hybrid 10 แท็บ หากเคยใช้ 20–30 แท็บ
+5. เคลียร์พื้นที่ไดรฟ์ C ให้มีพื้นที่ว่างอย่างน้อย 30 GB เนื่องจาก pagefile และ browser temporary files อยู่บน C
+6. ปิด Browser Session จาก HR Auto แล้วเปิดใหม่ ห้าม End task Chrome ทั้งหมดหากมี Chrome งานอื่นเปิดอยู่
+7. หากต้องล้างแคช ให้ปิด Browser ก่อนและล้างเฉพาะ `Cache`, `Code Cache`, `GPUCache` ห้ามลบ Cookies, Local Storage หรือทั้ง `browser-profile`
+
+ระบบจะจัดประเภทข้อผิดพลาดในคิว เช่น `RENDERER_CRASHED`, `BROWSER_SESSION_CLOSED`, `NETWORK_FAILED` และ `FACEBOOK_TIMEOUT` เพื่อแยกสาเหตุออกจากปัญหา selector
 
 ## Facebook Session และข้อจำกัด
 

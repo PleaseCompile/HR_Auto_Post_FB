@@ -75,6 +75,7 @@ export interface RunRecord {
   mode: RunMode;
   workflow: RunWorkflow;
   tabLimit: number;
+  autoConfirm: boolean;
   status:
     | "queued"
     | "running"
@@ -120,4 +121,11 @@ export interface SessionStatus {
   authenticated: boolean;
   url: string | null;
   accountIdMasked: string | null;
+  pageCount?: number;
+  profileLocked?: boolean;
+  ownerPid?: number | null;
+  crashCount?: number;
+  pageErrorCount?: number;
+  lastError?: string | null;
+  lastEventAt?: string | null;
 }

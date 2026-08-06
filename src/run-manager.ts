@@ -1,3 +1,4 @@
+import os from "node:os";
 import type { Page } from "playwright";
 import { browserSession } from "./session.js";
 import {
@@ -5,6 +6,7 @@ import {
   inspectGroup,
   preparePost,
   submitPreparedPost,
+  SecurityCheckpointError,
   type PreparedPost,
 } from "./facebook.js";
 import {
@@ -38,8 +40,14 @@ interface PendingPrepared {
 interface Controller {
   stopped: boolean;
   paused: boolean;
+  autoConfirm: boolean;
   workflow: RunWorkflow;
   tabLimit: number;
+  maximumTabLimit: number;
+  consecutivePreparationFailures: number;
+  consecutiveAutoConfirmFailures: number;
+  stablePreparations: number;
+  pressurePaused: boolean;
   waitingTargetId: string | null;
   resolveAction: ((request: ActionRequest) => void) | null;
   prepared: Map<string, PendingPrepared>;
@@ -48,6 +56,69 @@ interface Controller {
 
 const delay = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const DEFAULT_HYBRID_TAB_LIMIT = 10;
+const MAX_HYBRID_WINDOWS_TAB_LIMIT = 30;
+const MAX_HYBRID_TABS_LIMIT = Number(process.env.HR_AUTO_MAX_HYBRID_TABS_LIMIT || 250);
+const MIN_AVAILABLE_MEMORY_BYTES = 4 * 1024 * 1024 * 1024;
+const MIN_AVAILABLE_MEMORY_RATIO = 0.12;
+const PREPARATION_COOLDOWN_MS = Math.max(
+  0,
+  Number(process.env.HR_AUTO_PREPARE_DELAY_MS ?? 1_000),
+);
+
+function readableMemory(bytes: number): string {
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+function classifyAutomationError(
+  error: unknown,
+  rendererCrashed = false,
+): { code: string; message: string } {
+  const raw = error instanceof Error ? error.message : "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ";
+  if (
+    error instanceof SecurityCheckpointError ||
+    /checkpoint|security check|captcha|log in|เข้าสู่ระบบ|ถูกจำกัดการใช้งาน|ยืนยันตัวตน|ยืนยันบัญชี/i.test(
+      raw,
+    )
+  ) {
+    return {
+      code: "SECURITY_CHECKPOINT",
+      message: "Facebook ต้องการให้ยืนยันตัวตน (Security Check/CAPTCHA/Checkpoint) หรือบัญชีถูกจำกัดการใช้งาน",
+    };
+  }
+  if (rendererCrashed || /\bcrash(?:ed)?\b|page crashed/i.test(raw)) {
+    return {
+      code: "RENDERER_CRASHED",
+      message: "แท็บ Chromium หยุดทำงาน ระบบจะลดจำนวนแท็บพร้อมกัน",
+    };
+  }
+  if (/profile is already in use|existing browser session|browser profile/i.test(raw)) {
+    return {
+      code: "PROFILE_LOCKED",
+      message: "Browser profile ถูกใช้งานโดย HR Auto หรือ Chromium อีกหน้าต่าง",
+    };
+  }
+  if (/target page, context or browser has been closed|browser has been closed|context closed/i.test(raw)) {
+    return {
+      code: "BROWSER_SESSION_CLOSED",
+      message: "Browser session ถูกปิดหรือหลุดระหว่างทำงาน",
+    };
+  }
+  if (/ERR_CONNECTION|net::|request failed|connection (?:closed|reset)/i.test(raw)) {
+    return {
+      code: "NETWORK_FAILED",
+      message: `การเชื่อมต่อ Facebook ไม่สำเร็จ · ${raw}`,
+    };
+  }
+  if (/timeout|timed out|เกินเวลา|หลังรอ/i.test(raw)) {
+    return {
+      code: "FACEBOOK_TIMEOUT",
+      message: `Facebook ตอบสนองช้าหรือหน้าไม่สมบูรณ์ · ${raw}`,
+    };
+  }
+  return { code: "AUTOMATION_FAILED", message: raw };
+}
 
 class RunManager {
   private controllers = new Map<string, Controller>();
@@ -62,21 +133,36 @@ class RunManager {
 
   start(runId: string): void {
     if (this.controllers.has(runId)) throw new Error("คิวนี้กำลังทำงานอยู่");
+    if (this.controllers.size > 0) {
+      throw new Error(
+        "มีคิวอื่นกำลังควบคุม Facebook Browser อยู่ กรุณาทำคิวเดิมให้เสร็จหรือหยุดก่อนเริ่มคิวใหม่",
+      );
+    }
     const run = getRun(runId);
     if (!run) throw new Error("ไม่พบคิวงาน");
     if (!["queued", "interrupted", "stopped"].includes(run.status)) {
       throw new Error(`ไม่สามารถเริ่มคิวที่มีสถานะ ${run.status}`);
     }
+    const requestedTabLimit =
+      run.workflow === "hybrid-windows"
+        ? Math.min(MAX_HYBRID_WINDOWS_TAB_LIMIT, Math.max(1, run.tabLimit || 30))
+        : run.workflow === "hybrid-tabs"
+          ? Math.min(
+              MAX_HYBRID_TABS_LIMIT,
+              Math.max(1, run.tabLimit || DEFAULT_HYBRID_TAB_LIMIT),
+            )
+          : 1;
     const controller: Controller = {
       stopped: false,
       paused: false,
+      autoConfirm: Boolean(run.autoConfirm),
       workflow: run.workflow || "sequential",
-      tabLimit:
-        run.workflow === "hybrid-windows"
-          ? Math.min(30, Math.max(1, run.tabLimit || 30))
-          : run.tabLimit === 0
-          ? Number.POSITIVE_INFINITY
-          : Math.max(1, run.tabLimit || 3),
+      tabLimit: requestedTabLimit,
+      maximumTabLimit: requestedTabLimit,
+      consecutivePreparationFailures: 0,
+      consecutiveAutoConfirmFailures: 0,
+      stablePreparations: 0,
+      pressurePaused: false,
       waitingTargetId: null,
       resolveAction: null,
       prepared: new Map(),
@@ -125,6 +211,67 @@ class RunManager {
       return;
     }
     await this.settlePrepared(runId, controller, targetId, action, reason);
+  }
+
+  async markPostedBulk(
+    runId: string,
+    targetIds: string[],
+  ): Promise<{
+    total: number;
+    succeeded: number;
+    failed: number;
+    results: Array<{
+      targetId: string;
+      ok: boolean;
+      status: string | null;
+      message: string;
+    }>;
+  }> {
+    const uniqueTargetIds = [...new Set(targetIds)];
+    const results: Array<{
+      targetId: string;
+      ok: boolean;
+      status: string | null;
+      message: string;
+    }> = [];
+
+    for (const targetId of uniqueTargetIds) {
+      try {
+        await this.action(runId, targetId, "mark-posted");
+        const target = getRun(runId)?.targets?.find(
+          (item) => item.id === targetId,
+        );
+        const ok = target?.status === "published";
+        results.push({
+          targetId,
+          ok,
+          status: target?.status || null,
+          message:
+            target?.message ||
+            (ok
+              ? "บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานเรียบร้อย"
+              : "ไม่สามารถยืนยันผลหลังเก็บหลักฐาน"),
+        });
+      } catch (error) {
+        results.push({
+          targetId,
+          ok: false,
+          status: null,
+          message:
+            error instanceof Error
+              ? error.message
+              : "เกิดข้อผิดพลาดขณะบันทึกผล",
+        });
+      }
+    }
+
+    const succeeded = results.filter((result) => result.ok).length;
+    return {
+      total: uniqueTargetIds.length,
+      succeeded,
+      failed: uniqueTargetIds.length - succeeded,
+      results,
+    };
   }
 
   async focusTarget(runId: string, targetId: string): Promise<void> {
@@ -182,6 +329,102 @@ class RunManager {
     while (controller.paused && !controller.stopped) await delay(250);
   }
 
+  private hasMemoryPressure(controller: Controller): boolean {
+    if (
+      controller.prepared.size === 0 &&
+      controller.workflow !== "hybrid-windows"
+    ) {
+      return false;
+    }
+    const free = os.freemem();
+    const total = os.totalmem();
+    return (
+      free < MIN_AVAILABLE_MEMORY_BYTES ||
+      (total > 0 && free / total < MIN_AVAILABLE_MEMORY_RATIO)
+    );
+  }
+
+  private async waitForCapacity(
+    controller: Controller,
+    target?: RunTargetRecord,
+    respectTabLimit = true,
+  ): Promise<void> {
+    let pressureMessageWritten = false;
+    while (!controller.stopped) {
+      const memoryPressure = this.hasMemoryPressure(controller);
+      const atTabLimit =
+        respectTabLimit && controller.prepared.size >= controller.tabLimit;
+      if (!controller.paused && !memoryPressure && !atTabLimit) break;
+      controller.pressurePaused = memoryPressure;
+      if (memoryPressure && target && !pressureMessageWritten) {
+        updateTarget(target.id, "queued", {
+          message: `พักการเปิดแท็บใหม่ชั่วคราว · RAM ว่าง ${readableMemory(os.freemem())} · รอให้คุณจัดการแท็บที่เปิดอยู่`,
+        });
+        pressureMessageWritten = true;
+      }
+      await delay(500);
+    }
+    controller.pressurePaused = false;
+  }
+
+  private recordPreparationOutcome(
+    controller: Controller,
+    succeeded: boolean,
+    errorCode?: string,
+  ): void {
+    if (succeeded) {
+      controller.consecutivePreparationFailures = 0;
+      controller.stablePreparations += 1;
+      if (
+        controller.stablePreparations >= 5 &&
+        controller.tabLimit < controller.maximumTabLimit
+      ) {
+        controller.tabLimit += 1;
+        controller.stablePreparations = 0;
+      }
+      return;
+    }
+    controller.stablePreparations = 0;
+    if (
+      !["RENDERER_CRASHED", "BROWSER_SESSION_CLOSED", "NETWORK_FAILED", "FACEBOOK_TIMEOUT", "SECURITY_CHECKPOINT"].includes(
+        errorCode || "",
+      )
+    ) {
+      return;
+    }
+    controller.consecutivePreparationFailures += 1;
+    if (controller.consecutivePreparationFailures < 2) return;
+    controller.tabLimit = Math.max(1, Math.floor(controller.tabLimit / 2));
+    controller.consecutivePreparationFailures = 0;
+  }
+
+  private handlePreparedPageUnavailable(
+    runId: string,
+    controller: Controller,
+    targetId: string,
+    kind: "closed" | "crashed",
+  ): void {
+    const pending = controller.prepared.get(targetId);
+    if (!pending || controller.acting.has(targetId) || controller.stopped) return;
+    controller.prepared.delete(targetId);
+    if (kind === "crashed") {
+      this.recordPreparationOutcome(controller, false, "RENDERER_CRASHED");
+      updateTarget(targetId, "failed", {
+        message:
+          "[RENDERER_CRASHED] แท็บ Chromium หยุดทำงาน รายการนี้ยังไม่ถูกโพสต์และสามารถลองใหม่ได้",
+      });
+    } else {
+      updateTarget(targetId, "manual_action_required", {
+        message:
+          "[TAB_CLOSED] แท็บถูกปิดก่อนบันทึกผล กรุณาตรวจ Facebook แล้วเลือกยืนยันว่าโพสต์เอง หากโพสต์สำเร็จ",
+      });
+    }
+    updateRunStatus(
+      runId,
+      controller.prepared.size ? "awaiting_confirmation" : "running",
+    );
+  }
+
   private waitForAction(controller: Controller, targetId: string): Promise<ActionRequest> {
     controller.waitingTargetId = targetId;
     return new Promise((resolve) => {
@@ -225,8 +468,8 @@ class RunManager {
           : "หยุดคิวระหว่างรอยืนยัน เก็บหลักฐานแล้ว กรุณาตรวจว่าโพสต์ถูกส่งหรือไม่",
       evidencePath,
     });
-    await this.closePrepared(controller, pending);
     controller.prepared.delete(targetId);
+    await this.closePrepared(controller, pending);
   }
 
   private async settlePrepared(
@@ -304,9 +547,11 @@ class RunManager {
         (result.status === "published" || result.status === "pending_review")
       ) {
         markGroupPosted(pending.target.group.id);
+        controller.consecutiveAutoConfirmFailures = 0;
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ";
+      const classified = classifyAutomationError(error);
+      const message = `[${classified.code}] ${classified.message}`;
       const evidencePath = await captureEvidence({
         page: pending.page,
         workDate: pending.draft.workDate,
@@ -317,10 +562,20 @@ class RunManager {
         postText: pending.draft.text,
       }).catch(() => null);
       updateTarget(targetId, "failed", { message, evidencePath });
+      if (classified.code === "SECURITY_CHECKPOINT") {
+        controller.paused = true;
+        updateRunStatus(runId, "paused");
+      } else if (controller.autoConfirm) {
+        controller.consecutiveAutoConfirmFailures += 1;
+        if (controller.consecutiveAutoConfirmFailures >= 2) {
+          controller.paused = true;
+          updateRunStatus(runId, "paused");
+        }
+      }
     } finally {
-      await this.closePrepared(controller, pending);
       controller.prepared.delete(targetId);
       controller.acting.delete(targetId);
+      await this.closePrepared(controller, pending);
     }
   }
 
@@ -330,8 +585,11 @@ class RunManager {
     controller: Controller,
     target: RunTargetRecord,
     error: unknown,
+    rendererCrashed = false,
   ): Promise<void> {
-    const message = error instanceof Error ? error.message : "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ";
+    const classified = classifyAutomationError(error, rendererCrashed);
+    const message = `[${classified.code}] ${classified.message}`;
+    this.recordPreparationOutcome(controller, false, classified.code);
     const evidencePath = await captureEvidence({
       page,
       workDate: run.draft!.workDate,
@@ -341,7 +599,20 @@ class RunManager {
       suffix: "failed",
       postText: run.draft!.text,
     }).catch(() => null);
-    if (controller.workflow === "hybrid-windows") {
+
+    if (classified.code === "SECURITY_CHECKPOINT") {
+      controller.paused = true;
+      updateRunStatus(run.id, "paused");
+      updateTarget(target.id, "failed", { message, evidencePath });
+      await page.close().catch(() => undefined);
+      return;
+    }
+
+    if (
+      controller.workflow === "hybrid-windows" &&
+      !page.isClosed() &&
+      !["RENDERER_CRASHED", "BROWSER_SESSION_CLOSED"].includes(classified.code)
+    ) {
       controller.prepared.set(target.id, {
         prepared: null,
         page,
@@ -383,8 +654,12 @@ class RunManager {
           evidencePath,
         });
       } catch (error) {
-        const message = error instanceof Error ? error.message : "ตรวจสอบกลุ่มไม่สำเร็จ";
-        updateTarget(target.id, "failed", { message });
+        const classified = classifyAutomationError(error);
+        if (classified.code === "SECURITY_CHECKPOINT") {
+          controller.paused = true;
+          updateRunStatus(run.id, "paused");
+        }
+        updateTarget(target.id, "failed", { message: `[${classified.code}] ${classified.message}` });
       }
     }
   }
@@ -397,6 +672,10 @@ class RunManager {
   ): Promise<void> {
     if (!target.group || !run.draft) return;
     const page = existingPage || (await browserSession.newPage());
+    let rendererCrashed = false;
+    page.once("crash", () => {
+      rendererCrashed = true;
+    });
     updateTarget(target.id, "opening", { message: "กำลังเปิดแท็บใหม่สำหรับกลุ่มนี้" });
     try {
       updateTarget(target.id, "preparing", { message: "กำลังใส่ข้อความและรูปในแท็บใหม่" });
@@ -407,21 +686,69 @@ class RunManager {
         target,
         draft: run.draft,
       });
+      page.once("crash", () =>
+        this.handlePreparedPageUnavailable(
+          run.id,
+          controller,
+          target.id,
+          "crashed",
+        ),
+      );
+      page.once("close", () =>
+        this.handlePreparedPageUnavailable(
+          run.id,
+          controller,
+          target.id,
+          "closed",
+        ),
+      );
+      this.recordPreparationOutcome(controller, true);
       if (controller.stopped) {
         await this.abandonPrepared(run.id, controller, target.id);
         return;
       }
       updateTarget(target.id, "awaiting_confirmation", {
         message:
-          controller.workflow === "hybrid-windows"
+          controller.autoConfirm
+            ? "พร้อมในแท็บใหม่ · กำลังเตรียมโพสต์อัตโนมัติ"
+            : controller.workflow === "hybrid-windows"
             ? "พร้อมในหน้าต่างแบบแบ่งชุด · แท็บจะไม่ปิดเอง จัดการใน Facebook แล้วบันทึกผล"
             : controller.workflow === "hybrid-tabs"
             ? "พร้อมในแท็บใหม่ · ยืนยัน โพสต์เอง หรือข้ามพร้อมหลักฐานได้"
             : "พร้อมในแท็บใหม่ · คิวรอคำสั่งจากคุณก่อนทำกลุ่มถัดไป",
       });
       updateRunStatus(run.id, "awaiting_confirmation");
+
+      if (controller.autoConfirm && !controller.paused && !controller.stopped) {
+        const minDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MIN_MS ?? 5_000);
+        const maxDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MAX_MS ?? 15_000);
+        const autoDelayMs = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+        setTimeout(() => {
+          if (
+            !controller.paused &&
+            !controller.stopped &&
+            controller.prepared.has(target.id) &&
+            !controller.acting.has(target.id)
+          ) {
+            void this.action(run.id, target.id, "confirm").catch((err) => {
+              const classified = classifyAutomationError(err);
+              if (classified.code === "SECURITY_CHECKPOINT") {
+                controller.paused = true;
+                updateRunStatus(run.id, "paused");
+              }
+            });
+          }
+        }, autoDelayMs);
+      }
     } catch (error) {
-      await this.recordPreparationFailure(page, run, controller, target, error);
+      await this.recordPreparationFailure(
+        page,
+        run,
+        controller,
+        target,
+        error,
+        rendererCrashed,
+      );
     }
   }
 
@@ -447,14 +774,12 @@ class RunManager {
   private async executeHybrid(run: RunRecord, controller: Controller): Promise<void> {
     for (const target of run.targets || []) {
       if (!["queued", "failed"].includes(target.status) || !target.group) continue;
-      while (
-        !controller.stopped &&
-        (controller.paused || controller.prepared.size >= controller.tabLimit)
-      ) {
-        await delay(250);
-      }
+      await this.waitForCapacity(controller, target);
       if (controller.stopped) break;
       await this.prepareInNewTab(run, controller, target);
+      if (!controller.stopped && PREPARATION_COOLDOWN_MS) {
+        await delay(PREPARATION_COOLDOWN_MS);
+      }
     }
 
     while (
@@ -483,7 +808,7 @@ class RunManager {
     let tabsInWindow = 0;
 
     for (const target of targets) {
-      await this.waitWhilePaused(controller);
+      await this.waitForCapacity(controller, target, false);
       if (controller.stopped) break;
 
       let page: Page;
@@ -497,6 +822,9 @@ class RunManager {
         tabsInWindow += 1;
       }
       await this.prepareInNewTab(run, controller, target, page);
+      if (!controller.stopped && PREPARATION_COOLDOWN_MS) {
+        await delay(PREPARATION_COOLDOWN_MS);
+      }
     }
 
     while (

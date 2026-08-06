@@ -13,6 +13,8 @@ const state = {
   groupProvince: "",
   groupStatus: "all",
   evidenceTargetId: null,
+  selectedRunTargets: new Set(),
+  bulkMarkPosted: null,
   evidenceFilters: {
     query: "",
     dateBasis: "work",
@@ -176,6 +178,31 @@ function findTargetContext(targetId) {
   return null;
 }
 
+function isBulkMarkable(run, target) {
+  const active = ["running", "awaiting_confirmation", "paused"].includes(
+    run.status,
+  );
+  return (
+    active &&
+    (target.status === "awaiting_confirmation" ||
+      (run.workflow === "hybrid-windows" &&
+        target.status === "manual_action_required"))
+  );
+}
+
+function pruneRunTargetSelection() {
+  const selectable = new Set(
+    state.runs.flatMap((run) =>
+      (run.targets || [])
+        .filter((target) => isBulkMarkable(run, target))
+        .map((target) => target.id),
+    ),
+  );
+  for (const targetId of state.selectedRunTargets) {
+    if (!selectable.has(targetId)) state.selectedRunTargets.delete(targetId);
+  }
+}
+
 function manualEvidenceForTarget(targetId) {
   return state.manualEvidence.filter((item) => item.targetId === targetId);
 }
@@ -242,6 +269,7 @@ async function refreshAll() {
   state.drafts = drafts;
   state.groups = groups;
   state.runs = runs;
+  pruneRunTargetSelection();
   state.groupScan = groupScan;
   state.manualEvidence = manualEvidence;
   renderSession(dashboard.session);
@@ -252,6 +280,9 @@ function renderSession(session) {
   if (session.authenticated) {
     sessionPill.classList.add("is-ready");
     sessionPill.innerHTML = `<span class="status-dot"></span><span>Facebook พร้อมใช้งาน</span>`;
+  } else if (session.profileLocked && !session.browserOpen) {
+    sessionPill.classList.add("is-warning");
+    sessionPill.innerHTML = `<span class="status-dot"></span><span>Profile ใช้อยู่ใน PID ${escapeHtml(session.ownerPid || "อื่น")}</span>`;
   } else if (session.browserOpen) {
     sessionPill.classList.add("is-warning");
     sessionPill.innerHTML = `<span class="status-dot"></span><span>รอคุณล็อกอิน</span>`;
@@ -637,16 +668,22 @@ function renderGroups() {
                 <option value="dry-run">Dry run — ตรวจกลุ่มเท่านั้น ไม่โพสต์</option>
               </select>
               <select id="runWorkflow" style="width:270px">
+                <option value="hybrid-tabs">Hybrid แนะนำ — เติมงานต่อเนื่อง</option>
                 <option value="hybrid-windows">หลายหน้าต่าง — ไม่ปิดแท็บเอง</option>
-                <option value="hybrid-tabs">Hybrid เดิม — จำกัดแท็บพร้อมกัน</option>
                 <option value="sequential">ทีละกลุ่ม — รอยืนยันก่อนทำกลุ่มถัดไป</option>
               </select>
               <select id="runTabLimit" style="width:190px" aria-label="จำนวนแท็บพร้อมกัน">
-                <option value="30" selected>30 แท็บต่อหน้าต่าง</option>
-                <option value="20">20 แท็บต่อหน้าต่าง</option>
-                <option value="10">10 แท็บต่อหน้าต่าง</option>
+                <option value="8">พร้อมกัน 8 แท็บ</option>
+                <option value="10" selected>พร้อมกัน 10 แท็บ (แนะนำ)</option>
+                <option value="15">พร้อมกัน 15 แท็บ</option>
+                <option value="20">พร้อมกัน 20 แท็บ</option>
+                <option value="30">พร้อมกัน 30 แท็บ (ขั้นสูง)</option>
               </select>
-              <span id="runWindowPlan" class="muted" style="font-size:11px">${escapeHtml(windowBatchSummary(selected, 30).text)}</span>
+              <label class="auto-confirm-label" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;margin-left:4px" title="เมื่อเปิดโหมดนี้ ระบบจะทยอยกดโพสต์ให้อัตโนมัติโดยไม่ต้องกด 'ยืนยันและโพสต์' เองทีละกลุ่ม">
+                <input type="checkbox" id="runAutoConfirm" />
+                <span>โพสต์อัตโนมัติ (Auto-confirm)</span>
+              </label>
+              <span id="runWindowPlan" class="muted" style="font-size:11px" hidden></span>
               <button class="button button-primary" data-action="create-run">สร้างคิวโพสต์</button>
               <button class="button button-danger" data-action="restart-draft-run" title="ลบทุกคิวเดิมของ Draft ที่เลือก แล้วสร้างคิวใหม่จากกลุ่มที่เลือกอยู่">
                 ล้างคิวเดิมทั้งหมดและสร้างใหม่
@@ -779,7 +816,7 @@ function renderRuns() {
   }
   return `
     <div class="page-header">
-      <div><h2>คิวงานทั้งหมด</h2><p class="muted">เลือกได้ทั้งแบบทีละกลุ่มหรือ Hybrid เปิดทุกกลุ่มพร้อมกัน โดยยังยืนยันก่อนโพสต์จริงทุกครั้ง</p></div>
+      <div><h2>คิวงานทั้งหมด</h2><p class="muted">Hybrid จะเติมงานต่อเนื่องตามเพดานแท็บ เมื่อคุณจัดการหนึ่งแท็บ ระบบจึงเตรียมกลุ่มถัดไป</p></div>
       <button class="button button-ghost" data-action="refresh">รีเฟรชสถานะ</button>
     </div>
     <div class="status-callout warning" style="margin-bottom:18px">
@@ -787,7 +824,7 @@ function renderRuns() {
       <div>
         <strong>ความหมายของปุ่มระหว่าง “รอยืนยัน”</strong>
         <span>ยืนยันและโพสต์ = ให้ระบบกด Post · ฉันโพสต์เองแล้ว = บันทึกผลและหลักฐานโดยไม่กดซ้ำ · ข้าม + หลักฐาน = แคปหน้าต่างก่อนปิดแท็บ</span>
-        <span>Hybrid แบบ “ทั้งหมด” จะทยอยเตรียมแท็บของทุกกลุ่มที่เลือกโดยไม่จำกัดจำนวน กลุ่มที่รอคุณจะไม่ถูกนับว่าไม่สำเร็จ</span>
+        <span>ค่าแนะนำคือ 10 แท็บพร้อมกัน ระบบจะพักการเปิดแท็บใหม่เมื่อ RAM เหลือน้อย และลดเพดานเองเมื่อพบ timeout หรือ renderer crash</span>
       </div>
     </div>
     <div class="status-legend" aria-label="คำอธิบายสีสถานะ">
@@ -820,6 +857,20 @@ function renderRunCard(run) {
     map[target.status] = (map[target.status] || 0) + 1;
     return map;
   }, {});
+  const bulkMarkableTargets = (run.targets || []).filter((target) =>
+    isBulkMarkable(run, target),
+  );
+  const selectedBulkTargets = bulkMarkableTargets.filter((target) =>
+    state.selectedRunTargets.has(target.id),
+  );
+  const bulkJob =
+    state.bulkMarkPosted?.runId === run.id ? state.bulkMarkPosted : null;
+  const bulkFinished = bulkJob
+    ? bulkJob.targetIds.filter((targetId) => {
+        const target = (run.targets || []).find((item) => item.id === targetId);
+        return target && target.status !== "awaiting_confirmation";
+      }).length
+    : 0;
   return `
     <article class="run-card run-state-${visualState(run.status)}">
       <div class="run-summary">
@@ -831,15 +882,14 @@ function renderRunCard(run) {
                 ? "ตรวจสอบเสร็จ"
                 : statusLabels[run.status] || run.status
             }</span>
+            ${run.autoConfirm ? '<span class="badge info">AUTO-CONFIRM</span>' : ""}
             <span class="tag">${
               run.mode === "dry-run"
                 ? "DRY RUN · ไม่โพสต์"
                 : run.workflow === "hybrid-windows"
                   ? `หลายหน้าต่าง · ${run.tabLimit || 30} แท็บ/หน้าต่าง · ไม่ปิดเอง`
                   : run.workflow === "hybrid-tabs"
-                  ? run.tabLimit === 0
-                    ? "HYBRID · ทุกกลุ่มพร้อมกัน"
-                    : `HYBRID · สูงสุด ${run.tabLimit || 3} แท็บ`
+                  ? `HYBRID · เติมต่อเนื่องสูงสุด ${run.tabLimit || 10} แท็บ`
                   : "ทีละกลุ่ม · แท็บใหม่"
             }</span>
           </div>
@@ -884,11 +934,56 @@ function renderRunCard(run) {
           }
         </div>
       </div>
+      ${
+        bulkMarkableTargets.length || bulkJob
+          ? `
+            <div class="run-bulk-bar ${bulkJob ? "is-working" : ""}">
+              <label class="bulk-select-all">
+                <input
+                  type="checkbox"
+                  data-bulk-select-all="${run.id}"
+                  ${bulkMarkableTargets.length > 0 && selectedBulkTargets.length === bulkMarkableTargets.length ? "checked" : ""}
+                  ${bulkJob ? "disabled" : ""}
+                />
+                <span>เลือกที่รอยืนยันทั้งหมด (${bulkMarkableTargets.length.toLocaleString("th-TH")})</span>
+              </label>
+              <span class="bulk-help">ติ๊กกลุ่มที่คุณกด Post ใน Facebook แล้ว ระบบจะไล่แคปทีละแท็บ</span>
+              <button
+                class="button button-small button-secondary"
+                data-action="bulk-mark-posted"
+                data-run="${run.id}"
+                ${selectedBulkTargets.length && !bulkJob ? "" : "disabled"}
+              >
+                ${
+                  bulkJob
+                    ? `กำลังเก็บหลักฐาน ${bulkFinished}/${bulkJob.targetIds.length}`
+                    : `ฉันโพสต์เองแล้วที่เลือก (${selectedBulkTargets.length})`
+                }
+              </button>
+            </div>
+          `
+          : ""
+      }
       <div class="target-list">
         ${(run.targets || [])
           .map(
             (target, index) => `
               <div class="target-row target-state-${visualState(target.status)}">
+                <div class="target-select">
+                  ${
+                    isBulkMarkable(run, target)
+                      ? `<input
+                          type="checkbox"
+                          class="target-bulk-check"
+                          data-run="${run.id}"
+                          data-target="${target.id}"
+                          aria-label="เลือก ${escapeHtml(target.group?.name || "กลุ่มนี้")} ว่าโพสต์เองแล้ว"
+                          ${state.selectedRunTargets.has(target.id) ? "checked" : ""}
+                          ${bulkJob ? "disabled" : ""}
+                        />`
+                      : ""
+                  }
+                </div>
                 <div class="target-index">${String(index + 1).padStart(2, "0")}</div>
                 <div class="target-main">
                   <strong>${escapeHtml(target.group?.name || "ไม่พบกลุ่ม")}</strong>
@@ -901,7 +996,7 @@ function renderRunCard(run) {
                       ? `
                         <button class="button button-small button-ghost" data-action="focus-target" data-run="${run.id}" data-target="${target.id}">เปิดแท็บ</button>
                         <button class="button button-small button-ghost" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="skip">ข้าม + หลักฐาน</button>
-                        <button class="button button-small button-secondary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="mark-posted">ฉันโพสต์เองแล้ว</button>
+                        <button class="button button-small button-secondary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="mark-posted" title="คลิกปกติจะถามยืนยัน · คลิก 3 ครั้งติดกันเพื่อบันทึกทันที" ${bulkJob ? "disabled" : ""}>ฉันโพสต์เองแล้ว</button>
                         <button class="button button-small button-primary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="confirm">ยืนยันและโพสต์</button>
                       `
                       : ""
@@ -912,7 +1007,7 @@ function renderRunCard(run) {
                         ? `
                           <button class="button button-small button-ghost" data-action="focus-target" data-run="${run.id}" data-target="${target.id}">เปิดแท็บ</button>
                           <button class="button button-small button-ghost" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="skip">ข้าม + หลักฐาน</button>
-                          <button class="button button-small button-secondary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="mark-posted">ฉันโพสต์เองแล้ว</button>
+                          <button class="button button-small button-secondary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="mark-posted" title="คลิกปกติจะถามยืนยัน · คลิก 3 ครั้งติดกันเพื่อบันทึกทันที" ${bulkJob ? "disabled" : ""}>ฉันโพสต์เองแล้ว</button>
                         `
                         : `<button class="button button-small button-secondary" data-action="reconcile-posted" data-run="${run.id}" data-target="${target.id}">ยืนยันว่าโพสต์เองแล้ว</button>`
                       : ""
@@ -1464,7 +1559,16 @@ function renderSettings() {
           <div><span>Authentication</span><strong>${session.authenticated ? "พร้อมใช้งาน" : "ยังไม่พร้อม"}</strong></div>
           <div><span>Account cookie</span><strong>${escapeHtml(session.accountIdMasked || "ไม่พบ")}</strong></div>
           <div><span>Current URL</span><strong>${escapeHtml(truncate(session.url || "—", 55))}</strong></div>
+          <div><span>แท็บที่ระบบดูแล</span><strong>${Number(session.pageCount || 0).toLocaleString("th-TH")}</strong></div>
+          <div><span>Profile owner</span><strong>${session.profileLocked ? `PID ${escapeHtml(session.ownerPid || "อื่น")}` : "ว่าง"}</strong></div>
+          <div><span>Renderer crash</span><strong>${Number(session.crashCount || 0).toLocaleString("th-TH")} ครั้ง</strong></div>
+          <div><span>Page/Web error</span><strong>${Number(session.pageErrorCount || 0).toLocaleString("th-TH")} ครั้ง</strong></div>
         </div>
+        ${
+          session.lastError
+            ? `<div class="status-callout warning" style="margin:14px 0"><div>!</div><div><strong>เหตุการณ์ล่าสุด</strong><span>${escapeHtml(session.lastError)}</span></div></div>`
+            : ""
+        }
         <div class="toolbar-start">
           <button class="button button-primary" data-action="connect-session">${session.browserOpen ? "เปิดหน้าต่าง Facebook" : "เชื่อมต่อ Facebook"}</button>
           ${session.browserOpen ? `<button class="button button-ghost" data-action="check-session">ตรวจ Session</button><button class="button button-danger" data-action="close-session">ปิด Browser</button>` : ""}
@@ -1580,21 +1684,27 @@ function bindGroupEvents() {
         ? currentValue
         : "30";
     } else if (hybrid) {
-      runTabLimit.innerHTML = `
-        <option value="0">ทุกกลุ่มพร้อมกัน</option>
-        <option value="2">สูงสุด 2 แท็บ</option>
-        <option value="3">สูงสุด 3 แท็บ</option>
-        <option value="4">สูงสุด 4 แท็บ</option>
-        <option value="5">สูงสุด 5 แท็บ</option>
-        <option value="10">สูงสุด 10 แท็บ</option>
-        <option value="20">สูงสุด 20 แท็บ</option>
-        <option value="30">สูงสุด 30 แท็บ</option>
+      const allowed = ["4", "8", "10", "15", "20", "30", "50", "100"];
+      let optionsHtml = `
+        <option value="4">พร้อมกัน 4 แท็บ</option>
+        <option value="8">พร้อมกัน 8 แท็บ</option>
+        <option value="10">พร้อมกัน 10 แท็บ (แนะนำ)</option>
+        <option value="15">พร้อมกัน 15 แท็บ</option>
+        <option value="20">พร้อมกัน 20 แท็บ</option>
+        <option value="30">พร้อมกัน 30 แท็บ (ขั้นสูง)</option>
+        <option value="50">พร้อมกัน 50 แท็บ</option>
+        <option value="100">พร้อมกัน 100 แท็บ</option>
+        <option value="custom">กำหนดเอง…</option>
       `;
-      runTabLimit.value = ["0", "2", "3", "4", "5", "10", "20", "30"].includes(
-        currentValue,
-      )
-        ? currentValue
-        : "0";
+      if (currentValue && !allowed.includes(currentValue) && currentValue !== "custom") {
+        optionsHtml = `<option value="${currentValue}" selected>พร้อมกัน ${currentValue} แท็บ (กำหนดเอง)</option>` + optionsHtml;
+      }
+      runTabLimit.innerHTML = optionsHtml;
+      if (currentValue && (allowed.includes(currentValue) || currentValue === "custom")) {
+        runTabLimit.value = currentValue;
+      } else if (!currentValue) {
+        runTabLimit.value = "10";
+      }
     }
     if (runWindowPlan) {
       runWindowPlan.hidden = !assisted || !windowed;
@@ -1606,7 +1716,23 @@ function bindGroupEvents() {
   };
   runMode?.addEventListener("change", syncRunWorkflowControls);
   runWorkflow?.addEventListener("change", syncRunWorkflowControls);
-  runTabLimit?.addEventListener("change", syncRunWorkflowControls);
+  runTabLimit?.addEventListener("change", () => {
+    if (runTabLimit.value === "custom") {
+      const inputVal = window.prompt("ระบุจำนวนแท็บพร้อมกันสำหรับโหมด Hybrid (1-250):", "50");
+      const num = parseInt(inputVal || "", 10);
+      if (num && num >= 1 && num <= 250) {
+        const customOpt = document.createElement("option");
+        customOpt.value = String(num);
+        customOpt.textContent = `พร้อมกัน ${num} แท็บ (กำหนดเอง)`;
+        customOpt.selected = true;
+        runTabLimit.appendChild(customOpt);
+        runTabLimit.value = String(num);
+      } else {
+        runTabLimit.value = "10";
+      }
+    }
+    syncRunWorkflowControls();
+  });
   syncRunWorkflowControls();
 
   document.querySelector("#groupSearch")?.addEventListener("input", (event) => {
@@ -1721,7 +1847,7 @@ async function importCsv(event) {
   }
 }
 
-async function handleAction(button) {
+async function handleAction(button, options = {}) {
   const action = button.dataset.action;
   try {
     if (action === "new-draft" || action === "go-compose") {
@@ -1825,15 +1951,20 @@ async function handleAction(button) {
       const workflow =
         mode === "dry-run"
           ? "sequential"
-          : document.querySelector("#runWorkflow")?.value || "hybrid-windows";
+          : document.querySelector("#runWorkflow")?.value || "hybrid-tabs";
       const tabLimitValue = document.querySelector("#runTabLimit")?.value;
       const tabLimit =
         workflow === "hybrid-windows"
           ? Number(tabLimitValue || 30)
-          : tabLimitValue === "0"
-            ? 0
-            : Number(tabLimitValue || 3);
+          : Number(tabLimitValue || 10);
+      const autoConfirm = Boolean(document.querySelector("#runAutoConfirm")?.checked);
       if (!draftId) throw new Error("กรุณาเลือก Draft");
+      if (autoConfirm && mode === "assisted") {
+        const confirmed = window.confirm(
+          "คุณกำลังสร้างคิวโหมดโพสต์อัตโนมัติ (Auto-confirm)\n\nกรุณายืนยันว่า:\n1. ได้ตรวจข้อความ รูปภาพ และรายชื่อกลุ่มทั้งหมดแล้ว\n2. บัญชี Facebook ปัจจุบันไม่ได้ติด Security Check/CAPTCHA\n\nระบบจะทยอยกดโพสต์ให้อัตโนมัติและหยุดทันทีหากพบปัญหา\n\nกด OK เพื่อยืนยันและเริ่มงาน",
+        );
+        if (!confirmed) return;
+      }
       await api("/api/runs", {
         method: "POST",
         body: JSON.stringify({
@@ -1841,6 +1972,7 @@ async function handleAction(button) {
           mode,
           workflow,
           tabLimit,
+          autoConfirm,
           groupIds: [...state.selectedGroups],
         }),
       });
@@ -1848,7 +1980,9 @@ async function handleAction(button) {
       await refreshAll();
       toast(
         mode === "assisted"
-          ? "สร้างคิวโพสต์จริงแล้ว กดเริ่มคิวเพื่อเตรียมโพสต์และยืนยันทีละกลุ่ม"
+          ? autoConfirm
+            ? "สร้างคิวโพสต์อัตโนมัติสำเร็จ กดเริ่มคิวเพื่อทำงาน"
+            : "สร้างคิวโพสต์จริงแล้ว กดเริ่มคิวเพื่อเตรียมโพสต์และยืนยันทีละกลุ่ม"
           : "สร้าง Dry run แล้ว โหมดนี้ตรวจกลุ่มเท่านั้นและจะไม่โพสต์",
       );
       navigate("runs");
@@ -1859,14 +1993,13 @@ async function handleAction(button) {
       const workflow =
         mode === "dry-run"
           ? "sequential"
-          : document.querySelector("#runWorkflow")?.value || "hybrid-windows";
+          : document.querySelector("#runWorkflow")?.value || "hybrid-tabs";
       const tabLimitValue = document.querySelector("#runTabLimit")?.value;
       const tabLimit =
         workflow === "hybrid-windows"
           ? Number(tabLimitValue || 30)
-          : tabLimitValue === "0"
-            ? 0
-            : Number(tabLimitValue || 3);
+          : Number(tabLimitValue || 10);
+      const autoConfirm = Boolean(document.querySelector("#runAutoConfirm")?.checked);
       if (!draftId) throw new Error("กรุณาเลือก Draft");
       const draftLabel =
         draftSelect?.selectedOptions?.[0]?.textContent?.trim() || "Draft ที่เลือก";
@@ -1879,6 +2012,12 @@ async function handleAction(button) {
         toast("ยกเลิกการเริ่มใหม่ เพราะคำยืนยันไม่ถูกต้อง", "error");
         return;
       }
+      if (autoConfirm && mode === "assisted") {
+        const confirmed = window.confirm(
+          "คุณกำลังสร้างคิวโหมดโพสต์อัตโนมัติ (Auto-confirm)\n\nกรุณายืนยันว่าได้ตรวจข้อความ รูปภาพ และกลุ่มทั้งหมดแล้ว\n\nกด OK เพื่อยืนยันและเริ่มงาน",
+        );
+        if (!confirmed) return;
+      }
       const restarted = await api("/api/runs/restart-draft", {
         method: "POST",
         body: JSON.stringify({
@@ -1886,6 +2025,7 @@ async function handleAction(button) {
           mode,
           workflow,
           tabLimit,
+          autoConfirm,
           groupIds: [...state.selectedGroups],
           acknowledgedUncertain: true,
           acknowledgedPosted: true,
@@ -1910,8 +2050,8 @@ async function handleAction(button) {
         body: JSON.stringify({
           draftId: sourceRun.draftId,
           mode: "assisted",
-          workflow: "hybrid-windows",
-          tabLimit: 30,
+          workflow: "hybrid-tabs",
+          tabLimit: 10,
           groupIds,
         }),
       });
@@ -1932,8 +2072,8 @@ async function handleAction(button) {
         body: JSON.stringify({
           draftId: sourceRun.draftId,
           mode: "assisted",
-          workflow: "hybrid-windows",
-          tabLimit: 30,
+          workflow: "hybrid-tabs",
+          tabLimit: 10,
           groupIds,
         }),
       });
@@ -2008,13 +2148,85 @@ async function handleAction(button) {
       if (action === "stop-run" && sourceRun?.workflow === "hybrid-windows") {
         toast("หยุดคิวแล้ว แท็บและหน้าต่าง Facebook ยังคงเปิดอยู่ คุณเป็นผู้ปิดเอง");
       }
+    } else if (action === "bulk-mark-posted") {
+      const runId = button.dataset.run;
+      const targetIds = [...state.selectedRunTargets].filter((targetId) => {
+        const context = findTargetContext(targetId);
+        return context?.run.id === runId && isBulkMarkable(context.run, context.target);
+      });
+      if (!targetIds.length) {
+        throw new Error("กรุณาติ๊กอย่างน้อยหนึ่งกลุ่มที่คุณโพสต์เองแล้ว");
+      }
+      const accepted = window.confirm(
+        `คุณกด Post ใน Facebook เองและเห็นโพสต์ของทั้ง ${targetIds.length.toLocaleString("th-TH")} กลุ่มแล้วใช่ไหม?\n\nระบบจะไล่เก็บหลักฐานทีละแท็บและจะไม่กด Post ซ้ำ`,
+      );
+      if (!accepted) return;
+      state.bulkMarkPosted = {
+        runId,
+        targetIds: [...targetIds],
+      };
+      render();
+      try {
+        let result = await api(`/api/runs/${runId}/targets/mark-posted-bulk`, {
+          method: "POST",
+          body: JSON.stringify({ targetIds }),
+        });
+        // A server process started before the bulk endpoint was added returns
+        // index.html from its SPA fallback. Preserve the active Facebook tabs
+        // and temporarily use the existing per-target endpoint instead.
+        if (
+          !result ||
+          typeof result.succeeded !== "number" ||
+          typeof result.failed !== "number"
+        ) {
+          const results = [];
+          for (const targetId of targetIds) {
+            try {
+              await api(`/api/runs/${runId}/targets/${targetId}/action`, {
+                method: "POST",
+                body: JSON.stringify({ action: "mark-posted" }),
+              });
+              results.push({ targetId, ok: true });
+            } catch (error) {
+              results.push({
+                targetId,
+                ok: false,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            }
+            await refreshAll();
+            render();
+          }
+          const succeeded = results.filter((item) => item.ok).length;
+          result = {
+            total: results.length,
+            succeeded,
+            failed: results.length - succeeded,
+            results,
+          };
+        }
+        toast(
+          result.failed
+            ? `บันทึกสำเร็จ ${result.succeeded}/${result.total} รายการ · มี ${result.failed} รายการต้องตรวจ`
+            : `บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานครบ ${result.succeeded} รายการ`,
+          result.failed ? "error" : "success",
+        );
+      } finally {
+        targetIds.forEach((targetId) => state.selectedRunTargets.delete(targetId));
+        state.bulkMarkPosted = null;
+        await refreshAll();
+        render();
+      }
     } else if (action === "target-action") {
       if (button.dataset.value === "confirm") {
         const accepted = window.confirm(
           "ตรวจข้อความ รูป และชื่อกลุ่มในแท็บ Facebook แล้วใช่ไหม?\n\nกดตกลงเพื่อให้ระบบคลิกปุ่ม Post จริงในแท็บนี้",
         );
         if (!accepted) return;
-      } else if (button.dataset.value === "mark-posted") {
+      } else if (
+        button.dataset.value === "mark-posted" &&
+        !options.skipMarkPostedConfirmation
+      ) {
         const accepted = window.confirm(
           "คุณกด Post ใน Facebook เองและเห็นโพสต์ปรากฏแล้วใช่ไหม?\n\nระบบจะไม่กด Post ซ้ำ แต่จะเก็บหลักฐานและบันทึกว่าเผยแพร่แล้ว",
         );
@@ -2038,7 +2250,7 @@ async function handleAction(button) {
         button.dataset.value === "confirm"
           ? `ระบบกด Post แล้วและกำลังเก็บหลักฐาน${keepOpenMessage}`
           : button.dataset.value === "mark-posted"
-            ? `บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานเรียบร้อย${keepOpenMessage}`
+            ? `${options.skipMarkPostedConfirmation ? "ทางลัด 3 คลิก · " : ""}บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานเรียบร้อย${keepOpenMessage}`
             : `ข้ามกลุ่มนี้พร้อมเก็บหลักฐานแล้ว${keepOpenMessage}`,
       );
       window.setTimeout(pollAndRender, 1000);
@@ -2108,10 +2320,56 @@ groupForm.addEventListener("submit", async (event) => {
   }
 });
 
+const markPostedClickState = new WeakMap();
+
+function scheduleMarkPostedAction(button, event) {
+  event.preventDefault();
+  const previous = markPostedClickState.get(button);
+  if (previous?.timer) window.clearTimeout(previous.timer);
+  const count = (previous?.count || 0) + 1;
+  if (count >= 3 || event.detail >= 3) {
+    markPostedClickState.delete(button);
+    void handleAction(button, { skipMarkPostedConfirmation: true });
+    return;
+  }
+  const timer = window.setTimeout(() => {
+    markPostedClickState.delete(button);
+    void handleAction(button);
+  }, 550);
+  markPostedClickState.set(button, { count, timer });
+}
+
+document.addEventListener("change", (event) => {
+  const targetCheckbox = event.target.closest(".target-bulk-check");
+  if (targetCheckbox) {
+    if (targetCheckbox.checked) state.selectedRunTargets.add(targetCheckbox.dataset.target);
+    else state.selectedRunTargets.delete(targetCheckbox.dataset.target);
+    render();
+    return;
+  }
+  const selectAll = event.target.closest("[data-bulk-select-all]");
+  if (selectAll) {
+    const run = state.runs.find((item) => item.id === selectAll.dataset.bulkSelectAll);
+    for (const target of run?.targets || []) {
+      if (!isBulkMarkable(run, target)) continue;
+      if (selectAll.checked) state.selectedRunTargets.add(target.id);
+      else state.selectedRunTargets.delete(target.id);
+    }
+    render();
+  }
+});
+
 document.addEventListener("click", (event) => {
   const nav = event.target.closest("[data-route]");
   if (nav) navigate(nav.dataset.route);
   const action = event.target.closest("[data-action]");
+  if (
+    action?.dataset.action === "target-action" &&
+    action.dataset.value === "mark-posted"
+  ) {
+    scheduleMarkPostedAction(action, event);
+    return;
+  }
   if (action) void handleAction(action);
 });
 

@@ -19,6 +19,25 @@ const pendingPhrases = [
   "post is pending",
 ];
 
+export class SecurityCheckpointError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SecurityCheckpointError";
+  }
+}
+
+const securityPattern =
+  /log in|เข้าสู่ระบบ|checkpoint|security check|ตรวจสอบความปลอดภัย|captcha|account restricted|ถูกจำกัดการใช้งาน|ยืนยันตัวตน|ยืนยันบัญชี|suspicious activity/i;
+
+export async function checkSecurityCheckpoint(page: Page): Promise<void> {
+  const bodyText = await page.locator("body").innerText().catch(() => "");
+  if (securityPattern.test(bodyText)) {
+    throw new SecurityCheckpointError(
+      "Facebook ต้องการให้ยืนยันตัวตน (Security Check/CAPTCHA/Checkpoint) หรือบัญชีถูกจำกัดการใช้งาน",
+    );
+  }
+}
+
 export interface PreparedPost {
   page: Page;
   dialog: Locator;
@@ -176,6 +195,7 @@ export async function preparePost(
 ): Promise<PreparedPost> {
   await page.goto(group.url, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForTimeout(1_500);
+  await checkSecurityCheckpoint(page);
   const composer = await findComposer(page);
   if (!composer) throw new Error("ไม่พบพื้นที่สร้างโพสต์ในกลุ่มนี้");
   await composer.click({ timeout: 15_000 });
@@ -210,6 +230,7 @@ export async function preparePost(
   if (await postButton.isDisabled().catch(() => false)) {
     throw new Error("ปุ่มโพสต์ยังไม่พร้อม อาจกำลังอัปโหลดรูปหรือกลุ่มต้องการข้อมูลเพิ่มเติม");
   }
+  await checkSecurityCheckpoint(page);
   return { page, dialog, postButton };
 }
 
@@ -221,6 +242,7 @@ export async function submitPreparedPost(prepared: PreparedPost): Promise<{
   await prepared.postButton.click({ timeout: 15_000 });
   await prepared.dialog.waitFor({ state: "hidden", timeout: 45_000 }).catch(() => undefined);
   await prepared.page.waitForTimeout(2_000);
+  await checkSecurityCheckpoint(prepared.page);
   const bodyText = (await prepared.page.locator("body").innerText().catch(() => "")).toLowerCase();
   if (pendingPhrases.some((phrase) => bodyText.includes(phrase))) {
     return {
@@ -255,6 +277,9 @@ export async function captureEvidence(input: {
   suffix: string;
   postText?: string;
 }): Promise<string> {
+  if (input.page.isClosed()) {
+    throw new Error("ไม่สามารถเก็บหลักฐานได้ เพราะแท็บถูกปิดหรือ Chromium หยุดทำงาน");
+  }
   const folder = path.join(evidenceDirectory, input.workDate, input.slot, input.runId);
   fs.mkdirSync(folder, { recursive: true });
   const fileName = `${bangkokTimestamp()}__${safeName(input.groupName) || "group"}__${safeName(
@@ -268,10 +293,14 @@ export async function captureEvidence(input: {
       .filter({ hasText: snippet })
       .first();
     if (await post.isVisible().catch(() => false)) {
-      await post.screenshot({ path: absolutePath });
+      await post.screenshot({ path: absolutePath, timeout: 10_000 });
       return absolutePath;
     }
   }
-  await input.page.screenshot({ path: absolutePath, fullPage: false });
+  await input.page.screenshot({
+    path: absolutePath,
+    fullPage: false,
+    timeout: 10_000,
+  });
   return absolutePath;
 }

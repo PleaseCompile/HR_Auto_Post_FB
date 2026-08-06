@@ -1182,6 +1182,45 @@ textarea:focus {
   gap: 7px;
 }
 
+.run-bulk-bar {
+  padding: 10px 18px;
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  color: #1849a9;
+  border-bottom: 1px solid #b2ccff;
+  background: #f5f8ff;
+}
+
+.run-bulk-bar.is-working {
+  color: #93370d;
+  border-bottom-color: #fedf89;
+  background: #fffaeb;
+}
+
+.bulk-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.bulk-select-all input,
+.target-select input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+.bulk-help {
+  color: var(--ink-500);
+  font-size: 9px;
+}
+
 .target-list {
   padding: 8px 16px 12px;
 }
@@ -1190,12 +1229,18 @@ textarea:focus {
   margin: 4px 0;
   padding: 10px 10px;
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr) 170px auto;
+  grid-template-columns: 22px 26px minmax(0, 1fr) 170px auto;
   align-items: center;
   gap: 12px;
   border: 1px solid transparent;
   border-radius: 8px;
   box-shadow: inset 4px 0 0 var(--line-strong);
+}
+
+.target-select {
+  display: grid;
+  place-items: center;
+  min-height: 16px;
 }
 
 .target-row:last-child {
@@ -1256,6 +1301,25 @@ textarea:focus {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
+}
+
+@media (max-width: 1100px) {
+  .run-bulk-bar {
+    grid-template-columns: 1fr auto;
+  }
+
+  .bulk-help {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .target-row {
+    grid-template-columns: 22px 26px minmax(0, 1fr) auto;
+  }
+
+  .target-actions {
+    grid-column: 3 / -1;
+  }
 }
 
 .status-callout {

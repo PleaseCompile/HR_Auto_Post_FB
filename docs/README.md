@@ -36,6 +36,7 @@
 
 | ไฟล์ | เนื้อหา | สถานะ |
 |---|---|---|
+| [UPDATE-GUIDE-TH.md](UPDATE-GUIDE-TH.md) | ขั้นตอนอัปเดตระบบ เช็กลิสต์ และสิ่งที่เปลี่ยน | ใช้ได้ปัจจุบัน |
 | [INSTALL-WINDOWS-TH.md](INSTALL-WINDOWS-TH.md) | ติดตั้ง เปิด อัปเดต และถอนบน Windows | ใช้ได้ปัจจุบัน |
 | [INSTALL-LINUX-TH.md](INSTALL-LINUX-TH.md) | ติดตั้ง dependencies และเปิดบน Linux Desktop | ใช้ได้ปัจจุบัน |
 | [USER-GUIDE-TH.md](USER-GUIDE-TH.md) | Workflow, สถานะ, หลักฐาน และตัวกรอง | ใช้ได้ปัจจุบัน |
