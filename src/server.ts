@@ -383,12 +383,6 @@ app.post("/api/runs", (request, response) => {
       autoConfirm: z.boolean().optional().default(false),
     })
     .parse(request.body);
-  if (
-    input.workflow === "hybrid-windows" &&
-    (input.tabLimit || 30) > 30
-  ) {
-    return response.status(400).json({ error: "โหมด Hybrid Windows กำหนดได้สูงสุด 30 แท็บ" });
-  }
   if (!getDraft(input.draftId)) return response.status(404).json({ error: "ไม่พบ Draft" });
   response.status(201).json(createRun(input));
 });
@@ -406,12 +400,6 @@ app.post("/api/runs/restart-draft", (request, response) => {
       acknowledgedPosted: z.boolean(),
     })
     .parse(request.body);
-  if (
-    input.workflow === "hybrid-windows" &&
-    (input.tabLimit || 30) > 30
-  ) {
-    return response.status(400).json({ error: "โหมด Hybrid Windows กำหนดได้สูงสุด 30 แท็บ" });
-  }
   if (!getDraft(input.draftId)) {
     return response.status(404).json({ error: "ไม่พบ Draft" });
   }
@@ -460,12 +448,6 @@ app.post("/api/runs/:id/workflow", (request, response) => {
       tabLimit: z.number().int().min(0).max(250).default(0),
     })
     .parse(request.body);
-  if (
-    input.workflow === "hybrid-windows" &&
-    (input.tabLimit || 30) > 30
-  ) {
-    return response.status(400).json({ error: "โหมด Hybrid Windows กำหนดได้สูงสุด 30 แท็บ" });
-  }
   const run = updateRunWorkflow(
     String(request.params.id),
     input.workflow,

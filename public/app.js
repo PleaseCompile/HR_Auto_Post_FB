@@ -670,7 +670,6 @@ function renderGroups() {
               <select id="runWorkflow" style="width:270px">
                 <option value="hybrid-tabs">Hybrid แนะนำ — เติมงานต่อเนื่อง</option>
                 <option value="hybrid-windows">หลายหน้าต่าง — ไม่ปิดแท็บเอง</option>
-                <option value="sequential">ทีละกลุ่ม — รอยืนยันก่อนทำกลุ่มถัดไป</option>
               </select>
               <select id="runTabLimit" style="width:190px" aria-label="จำนวนแท็บพร้อมกัน">
                 <option value="8">พร้อมกัน 8 แท็บ</option>
@@ -918,8 +917,8 @@ function renderRunCard(run) {
           ${
             run.mode === "assisted" &&
             ["queued", "interrupted", "stopped"].includes(run.status)
-              ? `<button class="button button-small button-ghost" data-action="switch-workflow" data-id="${run.id}" data-workflow="${run.workflow === "hybrid-windows" ? "sequential" : "hybrid-windows"}">${
-                  run.workflow === "hybrid-windows" ? "เปลี่ยนเป็นทีละกลุ่ม" : "เปลี่ยนเป็นหลายหน้าต่าง"
+              ? `<button class="button button-small button-ghost" data-action="switch-workflow" data-id="${run.id}" data-workflow="${run.workflow === "hybrid-windows" ? "hybrid-tabs" : "hybrid-windows"}">${
+                  run.workflow === "hybrid-windows" ? "เปลี่ยนเป็น Hybrid" : "เปลี่ยนเป็นหลายหน้าต่าง"
                 }</button>`
               : ""
           }
@@ -1674,36 +1673,27 @@ function bindGroupEvents() {
     const currentValue = runTabLimit.value;
     runWorkflow.disabled = !assisted;
     runTabLimit.disabled = !assisted || (!windowed && !hybrid);
-    if (windowed) {
-      runTabLimit.innerHTML = `
-        <option value="30">30 แท็บต่อหน้าต่าง</option>
-        <option value="20">20 แท็บต่อหน้าต่าง</option>
-        <option value="10">10 แท็บต่อหน้าต่าง</option>
-      `;
-      runTabLimit.value = ["10", "20", "30"].includes(currentValue)
-        ? currentValue
-        : "30";
-    } else if (hybrid) {
+    if (windowed || hybrid) {
+      const unitLabel = windowed ? "แท็บต่อหน้าต่าง" : "พร้อมกัน";
+      const suffix = (value, note) =>
+        windowed ? `${value} แท็บต่อหน้าต่าง${note ? ` (${note})` : ""}` : `${unitLabel} ${value} แท็บ${note ? ` (${note})` : ""}`;
       const allowed = ["4", "8", "10", "15", "20", "30", "50", "100"];
-      let optionsHtml = `
-        <option value="4">พร้อมกัน 4 แท็บ</option>
-        <option value="8">พร้อมกัน 8 แท็บ</option>
-        <option value="10">พร้อมกัน 10 แท็บ (แนะนำ)</option>
-        <option value="15">พร้อมกัน 15 แท็บ</option>
-        <option value="20">พร้อมกัน 20 แท็บ</option>
-        <option value="30">พร้อมกัน 30 แท็บ (ขั้นสูง)</option>
-        <option value="50">พร้อมกัน 50 แท็บ</option>
-        <option value="100">พร้อมกัน 100 แท็บ</option>
-        <option value="custom">กำหนดเอง…</option>
-      `;
+      const recommendedValue = windowed ? "30" : "10";
+      let optionsHtml = allowed
+        .map(
+          (value) =>
+            `<option value="${value}">${suffix(value, value === recommendedValue ? "แนะนำ" : "")}</option>`,
+        )
+        .join("");
+      optionsHtml += `<option value="custom">กำหนดเอง…</option>`;
       if (currentValue && !allowed.includes(currentValue) && currentValue !== "custom") {
-        optionsHtml = `<option value="${currentValue}" selected>พร้อมกัน ${currentValue} แท็บ (กำหนดเอง)</option>` + optionsHtml;
+        optionsHtml = `<option value="${currentValue}" selected>${suffix(currentValue, "กำหนดเอง")}</option>` + optionsHtml;
       }
       runTabLimit.innerHTML = optionsHtml;
       if (currentValue && (allowed.includes(currentValue) || currentValue === "custom")) {
         runTabLimit.value = currentValue;
-      } else if (!currentValue) {
-        runTabLimit.value = "10";
+      } else {
+        runTabLimit.value = recommendedValue;
       }
     }
     if (runWindowPlan) {
@@ -1718,17 +1708,22 @@ function bindGroupEvents() {
   runWorkflow?.addEventListener("change", syncRunWorkflowControls);
   runTabLimit?.addEventListener("change", () => {
     if (runTabLimit.value === "custom") {
-      const inputVal = window.prompt("ระบุจำนวนแท็บพร้อมกันสำหรับโหมด Hybrid (1-250):", "50");
+      const windowed = runWorkflow?.value === "hybrid-windows";
+      const promptLabel = windowed ? "จำนวนแท็บต่อหน้าต่าง" : "จำนวนแท็บพร้อมกัน";
+      const fallback = windowed ? "30" : "10";
+      const inputVal = window.prompt(`ระบุ${promptLabel} (1-250):`, "50");
       const num = parseInt(inputVal || "", 10);
       if (num && num >= 1 && num <= 250) {
         const customOpt = document.createElement("option");
         customOpt.value = String(num);
-        customOpt.textContent = `พร้อมกัน ${num} แท็บ (กำหนดเอง)`;
+        customOpt.textContent = windowed
+          ? `${num} แท็บต่อหน้าต่าง (กำหนดเอง)`
+          : `พร้อมกัน ${num} แท็บ (กำหนดเอง)`;
         customOpt.selected = true;
         runTabLimit.appendChild(customOpt);
         runTabLimit.value = String(num);
       } else {
-        runTabLimit.value = "10";
+        runTabLimit.value = fallback;
       }
     }
     syncRunWorkflowControls();
@@ -2129,7 +2124,7 @@ async function handleAction(button, options = {}) {
         method: "POST",
         body: JSON.stringify({
           workflow,
-          tabLimit: workflow === "hybrid-windows" ? 30 : 0,
+          tabLimit: workflow === "hybrid-windows" ? 30 : 10,
         }),
       });
       await refreshAll();
@@ -2137,7 +2132,7 @@ async function handleAction(button, options = {}) {
       toast(
         workflow === "hybrid-windows"
           ? "เปลี่ยนเป็นหลายหน้าต่าง สูงสุด 30 แท็บต่อหน้าต่าง และไม่ปิดแท็บเองแล้ว"
-          : "เปลี่ยนเป็นแบบทีละกลุ่มแล้ว",
+          : "เปลี่ยนเป็น Hybrid เติมงานต่อเนื่องแล้ว",
       );
     } else if (action === "pause-run" || action === "resume-run" || action === "stop-run") {
       const endpoint = action.split("-")[0];

@@ -157,6 +157,26 @@ try {
     throw new Error("Windowed workflow settings were not saved");
   }
 
+  // The old hard cap of 30 tabs per window was a manual-reviewability guideline,
+  // not a RAM limit, so both hybrid workflows now share the 250 ceiling.
+  const wideWindowedRun = await jsonRequest("/api/runs", {
+    method: "POST",
+    body: JSON.stringify({
+      draftId: draft.id,
+      groupIds: [windowedGroup.id],
+      mode: "assisted",
+      workflow: "hybrid-windows",
+      tabLimit: 50,
+    }),
+  });
+  const savedWideWindowedRun = await jsonRequest(`/api/runs/${wideWindowedRun.id}`);
+  if (
+    savedWideWindowedRun.workflow !== "hybrid-windows" ||
+    savedWideWindowedRun.tabLimit !== 50
+  ) {
+    throw new Error("Windowed workflow did not accept a tabLimit above the old 30 cap");
+  }
+
   const overLimitResponse = await fetch(`http://127.0.0.1:${port}/api/runs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -165,15 +185,11 @@ try {
       groupIds: [windowedGroup.id],
       mode: "assisted",
       workflow: "hybrid-windows",
-      tabLimit: 31,
+      tabLimit: 251,
     }),
   });
-  const overLimitBody = await overLimitResponse.json();
-  if (
-    overLimitResponse.status !== 400 ||
-    !String(overLimitBody.error || "").includes("30")
-  ) {
-    throw new Error("Windowed workflow did not reject more than 30 tabs");
+  if (overLimitResponse.status !== 400) {
+    throw new Error("Windowed workflow did not reject a tabLimit above 250");
   }
 
   const customHybridRun = await jsonRequest("/api/runs", {

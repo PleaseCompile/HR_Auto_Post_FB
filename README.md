@@ -61,6 +61,8 @@ chmod +x scripts/start-linux.sh
 | ต้องการทำอะไร | คู่มือ |
 |---|---|
 | อัปเดตโปรแกรมเป็นเวอร์ชันใหม่ | [UPDATE-GUIDE-TH.md](docs/UPDATE-GUIDE-TH.md) |
+| ติดตั้งจากไฟล์ Setup.exe | [INSTALL-SETUP-EXE-TH.md](docs/INSTALL-SETUP-EXE-TH.md) |
+| สร้างไฟล์ Setup.exe เพื่อแจกจ่าย | [BUILD-INSTALLER-TH.md](docs/BUILD-INSTALLER-TH.md) |
 | ติดตั้งบน Windows | [INSTALL-WINDOWS-TH.md](docs/INSTALL-WINDOWS-TH.md) |
 | ติดตั้งบน Linux | [INSTALL-LINUX-TH.md](docs/INSTALL-LINUX-TH.md) |
 | เรียนรู้ขั้นตอนใช้งาน | [USER-GUIDE-TH.md](docs/USER-GUIDE-TH.md) |

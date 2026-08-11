@@ -6,6 +6,10 @@ dist/
 data/*
 !data/.gitkeep
 
+# Installer build artifacts (bundled runtime, Chromium and the Setup.exe)
+installer/staging/
+installer/output/
+
 # Playwright state can impersonate the signed-in account
 playwright/.auth/
 test-results/

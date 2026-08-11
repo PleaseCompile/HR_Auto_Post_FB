@@ -16,6 +16,10 @@ import type {
   TargetStatus,
 } from "./types.js";
 
+// Shared ceiling for both Hybrid workflows. Declared here because it guards the
+// read path in rowToRun as well as the two write paths further down.
+const MAX_HYBRID_TABS_LIMIT = Number(process.env.HR_AUTO_MAX_HYBRID_TABS_LIMIT || 250);
+
 const db = new Database(databasePath);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
@@ -280,9 +284,9 @@ function rowToRun(row: any, expanded = false): RunRecord {
     workflow,
     tabLimit:
       workflow === "hybrid-windows"
-        ? Math.min(30, Math.max(1, Math.round(rawTabLimit || 30)))
+        ? Math.min(MAX_HYBRID_TABS_LIMIT, Math.max(1, Math.round(rawTabLimit || 30)))
         : workflow === "hybrid-tabs"
-          ? Math.min(250, Math.max(1, Math.round(rawTabLimit || 10)))
+          ? Math.min(MAX_HYBRID_TABS_LIMIT, Math.max(1, Math.round(rawTabLimit || 10)))
           : rawTabLimit === 0
             ? 0
             : Math.max(1, Math.round(rawTabLimit || 3)),
@@ -602,12 +606,10 @@ type RunDeletionOptions = {
   acknowledgedPosted?: boolean;
 };
 
-const MAX_HYBRID_TABS_LIMIT = Number(process.env.HR_AUTO_MAX_HYBRID_TABS_LIMIT || 250);
-
 function normalizeRunTabLimit(input: RunCreationInput): number {
   if (input.mode === "dry-run" || input.workflow === "sequential") return 0;
   if (input.workflow === "hybrid-windows") {
-    return Math.min(30, Math.max(1, Math.round(input.tabLimit || 30)));
+    return Math.min(MAX_HYBRID_TABS_LIMIT, Math.max(1, Math.round(input.tabLimit || 30)));
   }
   if (input.workflow === "hybrid-tabs") {
     return Math.min(MAX_HYBRID_TABS_LIMIT, Math.max(1, Math.round(input.tabLimit || 10)));
@@ -832,7 +834,7 @@ export function updateRunWorkflow(
   db.prepare("UPDATE runs SET workflow = ?, tab_limit = ? WHERE id = ?").run(
     workflow,
     workflow === "hybrid-windows"
-      ? Math.min(30, Math.max(1, Math.round(tabLimit || 30)))
+      ? Math.min(MAX_HYBRID_TABS_LIMIT, Math.max(1, Math.round(tabLimit || 30)))
       : workflow === "hybrid-tabs"
         ? Math.min(MAX_HYBRID_TABS_LIMIT, Math.max(1, Math.round(tabLimit || 10)))
         : 0,

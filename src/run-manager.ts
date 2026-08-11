@@ -58,7 +58,10 @@ const delay = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 const DEFAULT_HYBRID_TAB_LIMIT = 10;
-const MAX_HYBRID_WINDOWS_TAB_LIMIT = 30;
+const DEFAULT_HYBRID_WINDOWS_TAB_LIMIT = 30;
+// Both Hybrid workflows share one configurable ceiling. Hybrid windows used to be
+// hard-capped at 30 tabs/window for manual reviewability, not RAM — that cap is
+// now just this workflow's default, adjustable the same way as Hybrid tabs.
 const MAX_HYBRID_TABS_LIMIT = Number(process.env.HR_AUTO_MAX_HYBRID_TABS_LIMIT || 250);
 const MIN_AVAILABLE_MEMORY_BYTES = 4 * 1024 * 1024 * 1024;
 const MIN_AVAILABLE_MEMORY_RATIO = 0.12;
@@ -145,7 +148,10 @@ class RunManager {
     }
     const requestedTabLimit =
       run.workflow === "hybrid-windows"
-        ? Math.min(MAX_HYBRID_WINDOWS_TAB_LIMIT, Math.max(1, run.tabLimit || 30))
+        ? Math.min(
+            MAX_HYBRID_TABS_LIMIT,
+            Math.max(1, run.tabLimit || DEFAULT_HYBRID_WINDOWS_TAB_LIMIT),
+          )
         : run.workflow === "hybrid-tabs"
           ? Math.min(
               MAX_HYBRID_TABS_LIMIT,
@@ -720,8 +726,8 @@ class RunManager {
       updateRunStatus(run.id, "awaiting_confirmation");
 
       if (controller.autoConfirm && !controller.paused && !controller.stopped) {
-        const minDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MIN_MS ?? 5_000);
-        const maxDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MAX_MS ?? 15_000);
+        const minDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MIN_MS ?? 8_000);
+        const maxDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MAX_MS ?? 150_000);
         const autoDelayMs = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
         setTimeout(() => {
           if (
@@ -803,7 +809,10 @@ class RunManager {
       (target) =>
         ["queued", "failed"].includes(target.status) && Boolean(target.group),
     );
-    const tabsPerWindow = Math.min(30, Math.max(1, controller.tabLimit || 30));
+    const tabsPerWindow = Math.min(
+      MAX_HYBRID_TABS_LIMIT,
+      Math.max(1, controller.tabLimit || DEFAULT_HYBRID_WINDOWS_TAB_LIMIT),
+    );
     let windowAnchor: Page | null = null;
     let tabsInWindow = 0;
 

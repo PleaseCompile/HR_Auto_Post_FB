@@ -11,6 +11,7 @@ const composerLabels = [
   /create (?:a )?post/i,
 ];
 const postButtonLabels = [/^โพสต์$/i, /^post$/i];
+const facebookLoadTimeoutMs = Number(process.env.HR_AUTO_FACEBOOK_LOAD_TIMEOUT_MS || 45_000);
 const pendingPhrases = [
   "รอการอนุมัติ",
   "อยู่ระหว่างรออนุมัติ",
@@ -115,7 +116,7 @@ async function currentDialog(page: Page, timeoutMs = 15_000): Promise<Locator> {
 async function findTextbox(
   page: Page,
   dialog: Locator,
-  timeoutMs = 20_000,
+  timeoutMs = facebookLoadTimeoutMs,
 ): Promise<Locator | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -136,7 +137,7 @@ async function findTextbox(
 async function findPostButton(
   page: Page,
   dialog: Locator,
-  timeoutMs = 20_000,
+  timeoutMs = facebookLoadTimeoutMs,
 ): Promise<Locator | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -201,7 +202,10 @@ export async function preparePost(
   await composer.click({ timeout: 15_000 });
   const dialog = await currentDialog(page);
   const textbox = await findTextbox(page, dialog);
-  if (!textbox) throw new Error("ไม่พบกล่องกรอกข้อความหลังรอ Facebook โหลด 20 วินาที");
+  if (!textbox)
+    throw new Error(
+      `ไม่พบกล่องกรอกข้อความหลังรอ Facebook โหลด ${Math.round(facebookLoadTimeoutMs / 1000)} วินาที`,
+    );
   await textbox.click();
   await textbox.fill(draft.text).catch(async () => {
     await textbox.focus();
