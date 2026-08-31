@@ -2,6 +2,7 @@ import http from "node:http";
 import { chromium } from "playwright";
 import {
   ageInDays,
+  deletePendingCard,
   markPendingCards,
   parsePendingDate,
 } from "../dist/pending-cleaner.js";
@@ -132,22 +133,30 @@ const server = http.createServer((_request, response) => {
           ${card(4, "10 August at 19:02", "รับสมัครพนักงานรักษาความปลอดภัย ด่วนมาก")}
         </div>
         <script>
+          // Mirrors the real "Delete post?" modal: it renders a beat late and offers
+          // Cancel before Delete, so a non-waiting visibility check misses it.
           document.querySelector("#feed").addEventListener("click", (event) => {
             const button = event.target.closest('[role="button"]');
             if (!button || button.textContent.trim() !== "Delete") return;
-            const dialog = document.createElement("div");
-            dialog.setAttribute("role", "dialog");
-            dialog.innerHTML = "<p>Delete post?</p>";
-            const confirm = document.createElement("div");
-            confirm.setAttribute("role", "button");
-            confirm.textContent = "Delete";
             const item = button.closest(".feed-item");
-            confirm.addEventListener("click", () => {
-              item.remove();
-              dialog.remove();
-            });
-            dialog.append(confirm);
-            document.body.append(dialog);
+            window.setTimeout(() => {
+              const dialog = document.createElement("div");
+              dialog.setAttribute("role", "dialog");
+              dialog.innerHTML = "<h2>Delete post?</h2><p>Delete this post?</p>";
+              const cancel = document.createElement("div");
+              cancel.setAttribute("role", "button");
+              cancel.textContent = "Cancel";
+              cancel.addEventListener("click", () => dialog.remove());
+              const confirm = document.createElement("div");
+              confirm.setAttribute("role", "button");
+              confirm.innerHTML = "<span>Delete</span>";
+              confirm.addEventListener("click", () => {
+                item.remove();
+                dialog.remove();
+              });
+              dialog.append(cancel, confirm);
+              document.body.append(dialog);
+            }, 700);
           });
         </script>
       </body>
@@ -191,16 +200,15 @@ try {
   check("stamps one marker per card", markerCount === 4, `got ${markerCount}`);
 
   console.log("Pending deletion flow");
-  await page.locator('[data-hrauto-pending-delete="1"]').click();
-  const dialog = page.locator('[role="dialog"]').last();
-  await dialog.getByRole("button", { name: /^delete$/i }).click();
-  await page
-    .locator('[data-hrauto-pending="1"]')
-    .waitFor({ state: "detached", timeout: 5_000 });
+  // deletePendingCard is the code path the sweep actually runs, so the delayed modal
+  // above is what regressed when confirmation used a non-waiting visibility check.
+  const first = await deletePendingCard(page, 1);
+  check("confirms the delayed Delete post? modal", first.removed, first.note);
   check(
-    "confirming the dialog removes that card",
+    "removes exactly one card",
     (await page.locator(".feed-item").count()) === 3,
   );
+  check("leaves no modal open", (await page.locator('[role="dialog"]').count()) === 0);
 
   const remaining = await markPendingCards(page);
   check("re-marking renumbers the survivors", remaining.length === 3);
@@ -213,6 +221,28 @@ try {
     "markers stay sequential after a delete",
     remaining.every((item, index) => item.marker === index),
   );
+
+  // A modal left open must never be mistaken for a pending card: its Delete button has
+  // no Edit sibling, so an unguarded climb would claim <body> as one giant card.
+  await page.locator('[data-hrauto-pending-delete="0"]').click();
+  await page.locator('[role="dialog"]').waitFor({ state: "visible", timeout: 5_000 });
+  const withDialogOpen = await markPendingCards(page);
+  check(
+    "a stray modal is not counted as a card",
+    withDialogOpen.length === 3,
+    `got ${withDialogOpen.length}`,
+  );
+  check(
+    "no card swallows the whole page",
+    await page.evaluate(
+      () => !document.body.hasAttribute("data-hrauto-pending"),
+    ),
+  );
+  await page.locator('[role="dialog"] [role="button"]').first().click();
+
+  const missing = await deletePendingCard(page, 99);
+  check("reports a card that is no longer on the page", !missing.removed, missing.note);
+
 } finally {
   await browser.close();
   server.close();
