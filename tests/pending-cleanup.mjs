@@ -5,6 +5,7 @@ import {
   deletePendingCard,
   markPendingCards,
   parsePendingDate,
+  waitForPendingList,
 } from "../dist/pending-cleaner.js";
 
 let failures = 0;
@@ -119,6 +120,13 @@ function card(index, dateLabel, text) {
     </div>`;
 }
 
+const feedHtml = [
+  card(1, "25 August at 08:33", "รับสมัคร รปภ. ด่วน! ชาย - หญิง หน่วยงานเปิดใหม่"),
+  card(2, "3d", "รับสมัคร รปภ. ประจำวิภาวดี 16 เริ่มงานทันที"),
+  card(3, "25 สิงหาคม", "หางาน แม่บ้าน ประจำสำนักงาน รายได้ดี"),
+  card(4, "10 August at 19:02", "รับสมัครพนักงานรักษาความปลอดภัย ด่วนมาก"),
+].join("");
+
 const server = http.createServer((_request, response) => {
   response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
   response.end(`<!doctype html>
@@ -126,12 +134,15 @@ const server = http.createServer((_request, response) => {
       <body>
         <nav role="navigation"><a href="#">Pending<br />4 posts</a></nav>
         <h2 role="heading">Pending · 4</h2>
-        <div id="feed">
-          ${card(1, "25 August at 08:33", "รับสมัคร รปภ. ด่วน! ชาย - หญิง หน่วยงานเปิดใหม่")}
-          ${card(2, "3d", "รับสมัคร รปภ. ประจำวิภาวดี 16 เริ่มงานทันที")}
-          ${card(3, "25 สิงหาคม", "หางาน แม่บ้าน ประจำสำนักงาน รายได้ดี")}
-          ${card(4, "10 August at 19:02", "รับสมัครพนักงานรักษาความปลอดภัย ด่วนมาก")}
-        </div>
+        <div id="feed"></div>
+        <script>
+          // Facebook streams the pending list in well after DOMContentLoaded. Anything
+          // that reads the page on a fixed pause sees an empty feed and reports the
+          // group as clean.
+          window.setTimeout(() => {
+            document.querySelector("#feed").innerHTML = ${JSON.stringify(feedHtml)};
+          }, 2600);
+        </script>
         <script>
           // Mirrors the real "Delete post?" modal: it renders a beat late and offers
           // Cancel before Delete, so a non-waiting visibility check misses it.
@@ -172,6 +183,16 @@ const browser = await chromium.launch({ headless: true });
 try {
   const page = await browser.newPage();
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+
+  console.log("Pending list readiness");
+  const tooEarly = await markPendingCards(page);
+  check(
+    "the feed really does start empty",
+    tooEarly.length === 0,
+    `got ${tooEarly.length}`,
+  );
+  const listState = await waitForPendingList(page);
+  check("waits for the late-rendered feed", listState === "cards", listState);
 
   console.log("Pending card extraction");
   const cards = await markPendingCards(page);
