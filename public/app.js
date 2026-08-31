@@ -13,8 +13,6 @@ const state = {
   pendingSelected: new Set(),
   pendingSelectionInitFor: null,
   pendingExpanded: new Set(),
-  pendingDeleteMode: "all",
-  pendingOlderThanDays: 7,
   selectedGroups: new Set(),
   editingDraftId: null,
   pendingFiles: [],
@@ -1141,27 +1139,8 @@ function renderPendingResults(cleanup, sessionReady) {
         </div>
       </div>
       <div class="pending-delete-controls">
-        <label>
-          <span class="muted">ขอบเขตการลบ</span>
-          <select id="pendingDeleteMode" style="width:260px" ${deleting ? "disabled" : ""}>
-            <option value="all" ${state.pendingDeleteMode === "all" ? "selected" : ""}>ลบทั้งหมดทุกโพสต์</option>
-            <option value="older-than" ${state.pendingDeleteMode === "older-than" ? "selected" : ""}>ลบเฉพาะที่เก่ากว่าที่กำหนด</option>
-          </select>
-        </label>
-        ${
-          state.pendingDeleteMode === "older-than"
-            ? `<label>
-                 <span class="muted">เก่ากว่า (วัน)</span>
-                 <input id="pendingOlderThanDays" type="number" min="0" max="365" step="1" value="${state.pendingOlderThanDays}" style="width:110px" ${deleting ? "disabled" : ""} />
-               </label>`
-            : ""
-        }
+        <p class="muted">จะลบโพสต์ค้าง <strong>ทุกโพสต์</strong> ในกลุ่มที่เลือกไว้</p>
       </div>
-      ${
-        state.pendingDeleteMode === "older-than"
-          ? `<p class="muted">โพสต์ที่ระบบอ่านวันที่ไม่ได้จะถูก <strong>ข้าม</strong> ไม่ลบ เพื่อไม่ให้ลบผิดตัว</p>`
-          : ""
-      }
       <div class="pending-warning">
         <strong>ลบแล้วกู้คืนไม่ได้</strong>
         <span>Facebook ไม่มีถังขยะสำหรับโพสต์ที่รออนุมัติ ระบบจะถ่ายภาพทุกโพสต์เก็บไว้ใน <code>data/pending-cleanup/</code> ก่อนกดลบเสมอ</span>
@@ -2022,17 +2001,6 @@ function bindPendingEvents() {
     restored?.focus();
     restored?.setSelectionRange(restored.value.length, restored.value.length);
   });
-  document.querySelector("#pendingDeleteMode")?.addEventListener("change", (event) => {
-    state.pendingDeleteMode = event.target.value;
-    render();
-  });
-  document.querySelector("#pendingOlderThanDays")?.addEventListener("change", (event) => {
-    const value = Number(event.target.value);
-    state.pendingOlderThanDays = Number.isFinite(value)
-      ? Math.min(365, Math.max(0, Math.round(value)))
-      : 7;
-    render();
-  });
 }
 
 function bindComposeEvents() {
@@ -2332,8 +2300,8 @@ async function handleAction(button, options = {}) {
         body: JSON.stringify({
           scope,
           groupIds: scope === "custom" ? [...state.pendingCustomSelected] : [],
-          deleteMode: state.pendingDeleteMode,
-          olderThanDays: state.pendingOlderThanDays,
+          deleteMode: "all",
+          olderThanDays: 0,
         }),
       });
       state.pendingSelectionInitFor = null;
@@ -2361,12 +2329,8 @@ async function handleAction(button, options = {}) {
         state.pendingSelected.has(group.id),
       );
       const posts = groups.reduce((total, group) => total + group.pendingCount, 0);
-      const scopeNote =
-        state.pendingDeleteMode === "older-than"
-          ? `เฉพาะที่เก่ากว่า ${state.pendingOlderThanDays} วัน `
-          : "";
       const typed = window.prompt(
-        `จะลบโพสต์ค้าง${scopeNote}สูงสุด ${posts} โพสต์ ใน ${groups.length} กลุ่ม และกู้คืนไม่ได้
+        `จะลบโพสต์ค้างสูงสุด ${posts} โพสต์ ใน ${groups.length} กลุ่ม และกู้คืนไม่ได้
 พิมพ์ ลบ เพื่อยืนยัน:`,
         "",
       );
@@ -2381,8 +2345,10 @@ async function handleAction(button, options = {}) {
       await api("/api/pending-cleanup/delete/start", {
         method: "POST",
         body: JSON.stringify({
-          deleteMode: state.pendingDeleteMode,
-          olderThanDays: state.pendingOlderThanDays,
+          // Facebook scrambles the timestamp text on this page, so an age filter
+          // cannot be honoured; the sweep always deletes every pending post.
+          deleteMode: "all",
+          olderThanDays: 0,
           acknowledged: true,
         }),
       });

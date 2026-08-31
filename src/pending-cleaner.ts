@@ -361,26 +361,28 @@ export async function markPendingCards(page: Page): Promise<PendingCardSnapshot[
   );
 }
 
-/** Reads the "Pending · N" counter so a group with zero can be skipped cheaply. */
+/**
+ * Reads how many posts the page claims are pending. The sidebar lists Pending,
+ * Published, Declined and Removed together and prints a number only for the rows that
+ * have one, so the count has to be tied to the Pending label: a bare "N posts" match
+ * picked up the Published total and reported an already-clean group as unreadable.
+ */
 async function readPendingHeaderCount(page: Page): Promise<number | null> {
   return page.evaluate(() => {
     const clean = (value: string | null | undefined) =>
       (value || "").replace(/\s+/g, " ").trim();
-    const patterns = [
-      /pending\s*[·•\-]\s*(\d+)/i,
-      /(?:รอ(?:การ)?อนุมัติ|รอดำเนินการ)\s*[·•\-]\s*(\d+)/i,
-      /(\d+)\s*posts?\b/i,
-      /(\d+)\s*โพสต์/,
-    ];
+    const label = /(?:pending|รอ(?:การ)?อนุมัติ|รอดำเนินการ)/i;
     const scopes = Array.from(
       document.querySelectorAll<HTMLElement>('h1, h2, h3, [role="heading"], [role="navigation"] a, [role="tab"]'),
     );
-    for (const pattern of patterns) {
-      for (const scope of scopes) {
-        if (!scope.getClientRects().length) continue;
-        const match = clean(scope.innerText).match(pattern);
-        if (match && match[1] !== undefined) return Number(match[1]);
-      }
+    for (const scope of scopes) {
+      if (!scope.getClientRects().length) continue;
+      const text = clean(scope.innerText);
+      const at = text.search(label);
+      if (at < 0) continue;
+      // Only read digits that follow the Pending label inside this one element.
+      const match = text.slice(at).match(/^[^\d]{0,40}(\d+)/);
+      if (match && match[1] !== undefined) return Number(match[1]);
     }
     return null;
   });
@@ -410,8 +412,9 @@ export async function waitForPendingList(
               clean(button.innerText) || clean(button.getAttribute("aria-label")),
             ),
         ).length;
+        // Wording taken from the live page: an empty queue renders "No posts to show".
         const empty =
-          /no pending posts|nothing to show|ไม่มีโพสต์ที่รอ|ยังไม่มีโพสต์|ไม่มีเนื้อหา/i.test(
+          /no posts to show|no pending posts|nothing to show|ไม่มีโพสต์ที่จะแสดง|ไม่มีโพสต์ที่รอ|ยังไม่มีโพสต์|ไม่มีเนื้อหา/i.test(
             document.body.innerText || "",
           );
         return { cards, empty };
