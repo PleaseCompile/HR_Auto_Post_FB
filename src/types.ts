@@ -129,3 +129,82 @@ export interface SessionStatus {
   lastError?: string | null;
   lastEventAt?: string | null;
 }
+
+export type PendingCleanupScope = "known-pending" | "posted" | "all" | "custom";
+export type PendingDeleteMode = "all" | "older-than";
+
+export type PendingCleanupStatus =
+  | "idle"
+  | "scanning"
+  | "stopping-scan"
+  | "scanned"
+  | "deleting"
+  | "stopping-delete"
+  | "completed"
+  | "failed";
+
+export type PendingCleanupGroupStatus =
+  | "queued"
+  | "scanning"
+  | "scanned"
+  | "deleting"
+  | "done"
+  | "failed"
+  | "skipped";
+
+export type PendingPostStatus = "found" | "deleted" | "failed" | "skipped";
+
+export interface PendingPostRecord {
+  id: string;
+  cleanupGroupId: string;
+  position: number;
+  snippet: string;
+  rawDate: string;
+  postedAt: string | null;
+  ageDays: number | null;
+  status: PendingPostStatus;
+  evidencePath: string | null;
+  message: string;
+}
+
+export interface PendingCleanupGroupRecord {
+  id: string;
+  cleanupId: string;
+  groupId: string;
+  externalId: string;
+  groupName: string;
+  groupUrl: string;
+  pendingCount: number;
+  status: PendingCleanupGroupStatus;
+  selected: boolean;
+  deletedCount: number;
+  failedCount: number;
+  skippedCount: number;
+  message: string;
+  scannedAt: string | null;
+  posts?: PendingPostRecord[];
+}
+
+export interface PendingCleanupState {
+  id: string | null;
+  status: PendingCleanupStatus;
+  scope: PendingCleanupScope;
+  deleteMode: PendingDeleteMode;
+  olderThanDays: number;
+  startedAt: string | null;
+  scanFinishedAt: string | null;
+  finishedAt: string | null;
+  groupsTotal: number;
+  groupsScanned: number;
+  groupsWithPending: number;
+  pendingFound: number;
+  deleteGroupsTotal: number;
+  deleteGroupsDone: number;
+  deletedCount: number;
+  failedCount: number;
+  skippedCount: number;
+  message: string;
+  snapshotPath: string | null;
+  error: string | null;
+  groups?: PendingCleanupGroupRecord[];
+}

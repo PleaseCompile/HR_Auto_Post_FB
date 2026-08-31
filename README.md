@@ -65,6 +65,7 @@ chmod +x scripts/start-linux.sh
 | สร้างไฟล์ Setup.exe เพื่อแจกจ่าย | [BUILD-INSTALLER-TH.md](docs/BUILD-INSTALLER-TH.md) |
 | ติดตั้งบน Windows | [INSTALL-WINDOWS-TH.md](docs/INSTALL-WINDOWS-TH.md) |
 | ติดตั้งบน Linux | [INSTALL-LINUX-TH.md](docs/INSTALL-LINUX-TH.md) |
+| ล้างโพสต์ที่ค้างรออนุมัติ | [PENDING-CLEANUP-TH.md](docs/PENDING-CLEANUP-TH.md) |
 | เรียนรู้ขั้นตอนใช้งาน | [USER-GUIDE-TH.md](docs/USER-GUIDE-TH.md) |
 | ตั้งค่า Port, Data Directory และภาษา | [CONFIGURATION-TH.md](docs/CONFIGURATION-TH.md) |
 | สำรองหรือย้ายเครื่อง | [BACKUP-RESTORE-TH.md](docs/BACKUP-RESTORE-TH.md) |

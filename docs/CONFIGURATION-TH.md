@@ -11,6 +11,8 @@
 | `HR_AUTO_TIMEZONE` | `Asia/Bangkok` | วันที่และช่วงเวลาของงาน |
 | `HR_AUTO_LOCALE` | `th-TH` | Locale ของ Chromium |
 | `HR_AUTO_FACEBOOK_LOAD_TIMEOUT_MS` | `45000` | เวลารอสูงสุด (มิลลิวินาที) ให้ Facebook โหลดกล่องข้อความ/ปุ่มโพสต์ก่อนถือว่า Timeout เพิ่มค่านี้ถ้าเน็ตช้าหรือเจอ `[FACEBOOK_TIMEOUT]` บ่อย |
+| `HR_AUTO_PENDING_SCAN_DELAY_MS` | `1500` | เว้นระยะระหว่างเปิดแต่ละกลุ่มตอนตรวจหาโพสต์ค้าง ดู [PENDING-CLEANUP-TH.md](PENDING-CLEANUP-TH.md) |
+| `HR_AUTO_PENDING_DELETE_DELAY_MS` | `2500` | เว้นระยะระหว่างลบแต่ละโพสต์ค้าง |
 
 เซิร์ฟเวอร์ปัจจุบัน bind ที่ `127.0.0.1` เท่านั้น จึงเข้าถึงได้จากเครื่องเดียวและเปลี่ยนด้วย Environment Variable ไม่ได้
 

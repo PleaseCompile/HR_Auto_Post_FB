@@ -23,6 +23,8 @@ import {
   listGroups,
   listManualEvidence,
   listRuns,
+  countGroupsForPendingScopes,
+  getPendingCleanupPost,
   restartDraftRun,
   updateDraft,
   updateManualEvidence,
@@ -34,6 +36,7 @@ import {
   evidenceDirectory,
   groupScanDirectory,
   manualEvidenceDirectory,
+  pendingCleanupDirectory,
   port,
   projectRoot,
   publicDirectory,
@@ -43,6 +46,7 @@ import { browserSession } from "./session.js";
 import { runManager } from "./run-manager.js";
 import type { GroupRecord } from "./types.js";
 import { groupScanner } from "./group-scanner.js";
+import { pendingCleaner } from "./pending-cleaner.js";
 
 const app = express();
 const imageUpload = multer({
@@ -321,6 +325,9 @@ app.post("/api/groups/scan/start", asyncRoute(async (request, response) => {
   if (runManager.isBusy()) {
     throw new Error("มีคิวโพสต์กำลังทำงาน กรุณาหยุดหรือรอให้คิวจบก่อนสแกนกลุ่ม");
   }
+  if (pendingCleaner.isBusy()) {
+    throw new Error("กำลังล้าง Pending อยู่ กรุณารอให้เสร็จก่อนสแกนกลุ่ม");
+  }
   response.status(202).json(await groupScanner.start({ maxScrolls: input.maxScrolls }));
 }));
 
@@ -337,6 +344,100 @@ app.get("/api/groups/scan/snapshot", (_request, response) => {
   const safeRoot = `${path.resolve(groupScanDirectory)}${path.sep}`;
   if (!resolved.startsWith(safeRoot)) return response.status(403).end();
   response.download(resolved);
+});
+
+function assertBrowserIdle(action: string): void {
+  if (runManager.isBusy()) {
+    throw new Error(`มีคิวโพสต์กำลังทำงาน กรุณาหยุดหรือรอให้คิวจบก่อน${action}`);
+  }
+  if (groupScanner.isBusy()) {
+    throw new Error(`กำลังสแกนคลังกลุ่มอยู่ กรุณารอให้เสร็จก่อน${action}`);
+  }
+}
+
+app.get("/api/pending-cleanup", (_request, response) => {
+  response.json({
+    ...pendingCleaner.status(true),
+    scopeCounts: countGroupsForPendingScopes(),
+  });
+});
+
+app.post("/api/pending-cleanup/scan/start", asyncRoute(async (request, response) => {
+  const input = z
+    .object({
+      scope: z.enum(["known-pending", "posted", "all", "custom"]),
+      groupIds: z.array(z.string().uuid()).max(1000).optional().default([]),
+      deleteMode: z.enum(["all", "older-than"]).optional().default("all"),
+      olderThanDays: z.number().int().min(0).max(365).optional().default(7),
+    })
+    .parse(request.body);
+  assertBrowserIdle("ตรวจหาโพสต์ค้าง");
+  response.status(202).json(
+    await pendingCleaner.startScan({
+      scope: input.scope,
+      groupIds: input.groupIds,
+      deleteMode: input.deleteMode,
+      olderThanDays: input.olderThanDays,
+    }),
+  );
+}));
+
+app.post("/api/pending-cleanup/scan/stop", (_request, response) => {
+  response.json(pendingCleaner.stopScan());
+});
+
+app.post("/api/pending-cleanup/select", (request, response) => {
+  const input = z
+    .object({ groupIds: z.array(z.string().uuid()).max(1000) })
+    .parse(request.body);
+  const selected = pendingCleaner.select(input.groupIds);
+  response.json({ selected });
+});
+
+app.post("/api/pending-cleanup/delete/start", asyncRoute(async (request, response) => {
+  const input = z
+    .object({
+      deleteMode: z.enum(["all", "older-than"]),
+      olderThanDays: z.number().int().min(0).max(365).optional().default(7),
+      acknowledged: z.literal(true, {
+        error: "กรุณายืนยันว่าเข้าใจว่าโพสต์ที่ลบแล้วกู้คืนไม่ได้",
+      }),
+    })
+    .parse(request.body);
+  assertBrowserIdle("ลบโพสต์ค้าง");
+  response.status(202).json(
+    await pendingCleaner.startDelete({
+      deleteMode: input.deleteMode,
+      olderThanDays: input.olderThanDays,
+      acknowledged: input.acknowledged,
+    }),
+  );
+}));
+
+app.post("/api/pending-cleanup/delete/stop", (_request, response) => {
+  response.json(pendingCleaner.stopDelete());
+});
+
+app.get("/api/pending-cleanup/snapshot", (_request, response) => {
+  const snapshotPath = pendingCleaner.status().snapshotPath;
+  if (!snapshotPath || !fs.existsSync(snapshotPath)) {
+    return response.status(404).json({ error: "ยังไม่มี JSON snapshot" });
+  }
+  const resolved = path.resolve(snapshotPath);
+  const safeRoot = `${path.resolve(pendingCleanupDirectory)}${path.sep}`;
+  if (!resolved.startsWith(safeRoot)) return response.status(403).end();
+  response.download(resolved);
+});
+
+app.get("/api/pending-cleanup/posts/:id/evidence", (request, response) => {
+  const post = getPendingCleanupPost(String(request.params.id));
+  if (!post?.evidencePath || !fs.existsSync(post.evidencePath)) {
+    return response.status(404).json({ error: "ไม่พบภาพหลักฐานของโพสต์นี้" });
+  }
+  const resolved = path.resolve(post.evidencePath);
+  const safeRoot = `${path.resolve(pendingCleanupDirectory)}${path.sep}`;
+  if (!resolved.startsWith(safeRoot)) return response.status(403).end();
+  response.sendFile(resolved);
 });
 
 app.get("/api/runs", (_request, response) => {
@@ -436,6 +537,11 @@ app.post("/api/runs/restart-draft", (request, response) => {
 app.post("/api/runs/:id/start", (request, response) => {
   if (groupScanner.isBusy()) {
     return response.status(409).json({ error: "กำลังสแกนกลุ่ม กรุณารอให้สแกนจบก่อนเริ่มคิว" });
+  }
+  if (pendingCleaner.isBusy()) {
+    return response
+      .status(409)
+      .json({ error: "กำลังล้าง Pending กรุณารอให้เสร็จก่อนเริ่มคิว" });
   }
   runManager.start(String(request.params.id));
   response.status(202).json({ ok: true });

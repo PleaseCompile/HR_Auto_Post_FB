@@ -8,6 +8,14 @@ import type {
   GroupScanState,
   ManualEvidenceRecord,
   MediaRecord,
+  PendingCleanupGroupRecord,
+  PendingCleanupGroupStatus,
+  PendingCleanupScope,
+  PendingCleanupState,
+  PendingCleanupStatus,
+  PendingDeleteMode,
+  PendingPostRecord,
+  PendingPostStatus,
   RunMode,
   RunRecord,
   RunWorkflow,
@@ -115,10 +123,65 @@ db.exec(`
     updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS pending_cleanup_runs (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'known-pending',
+    delete_mode TEXT NOT NULL DEFAULT 'all',
+    older_than_days INTEGER NOT NULL DEFAULT 7,
+    started_at TEXT NOT NULL,
+    scan_finished_at TEXT,
+    finished_at TEXT,
+    groups_total INTEGER NOT NULL DEFAULT 0,
+    groups_scanned INTEGER NOT NULL DEFAULT 0,
+    groups_with_pending INTEGER NOT NULL DEFAULT 0,
+    pending_found INTEGER NOT NULL DEFAULT 0,
+    delete_groups_total INTEGER NOT NULL DEFAULT 0,
+    delete_groups_done INTEGER NOT NULL DEFAULT 0,
+    deleted_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    snapshot_path TEXT,
+    error TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS pending_cleanup_groups (
+    id TEXT PRIMARY KEY,
+    cleanup_id TEXT NOT NULL REFERENCES pending_cleanup_runs(id) ON DELETE CASCADE,
+    group_id TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    group_name TEXT NOT NULL,
+    group_url TEXT NOT NULL,
+    pending_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'queued',
+    selected INTEGER NOT NULL DEFAULT 0,
+    deleted_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    skipped_count INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    position INTEGER NOT NULL DEFAULT 0,
+    scanned_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS pending_cleanup_posts (
+    id TEXT PRIMARY KEY,
+    cleanup_group_id TEXT NOT NULL REFERENCES pending_cleanup_groups(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    snippet TEXT NOT NULL DEFAULT '',
+    raw_date TEXT NOT NULL DEFAULT '',
+    posted_at TEXT,
+    age_days REAL,
+    status TEXT NOT NULL DEFAULT 'found',
+    evidence_path TEXT,
+    message TEXT NOT NULL DEFAULT ''
+  );
+
   CREATE INDEX IF NOT EXISTS idx_drafts_work_date ON drafts(work_date);
   CREATE INDEX IF NOT EXISTS idx_targets_run ON run_targets(run_id, position);
   CREATE INDEX IF NOT EXISTS idx_groups_active ON groups_list(active);
   CREATE INDEX IF NOT EXISTS idx_manual_evidence_target ON manual_evidence(target_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_cleanup_groups_run ON pending_cleanup_groups(cleanup_id, position);
+  CREATE INDEX IF NOT EXISTS idx_cleanup_posts_group ON pending_cleanup_posts(cleanup_group_id, position);
 `);
 
 function ensureColumn(table: string, column: string, definition: string): void {
@@ -139,6 +202,12 @@ db.prepare(
   `UPDATE group_scan_runs
    SET status = 'failed', finished_at = ?, error = 'แอปถูกปิดระหว่างการสแกน'
    WHERE status IN ('running', 'stopping')`,
+).run(new Date().toISOString());
+
+db.prepare(
+  `UPDATE pending_cleanup_runs
+   SET status = 'failed', finished_at = ?, error = 'แอปถูกปิดระหว่างการล้าง Pending'
+   WHERE status IN ('scanning', 'stopping-scan', 'deleting', 'stopping-delete')`,
 ).run(new Date().toISOString());
 
 db.prepare(
@@ -1036,4 +1105,443 @@ export function dashboardSummary() {
 
 export function closeDatabase(): void {
   db.close();
+}
+
+/* ------------------------------------------------------------------ *
+ * Pending cleanup
+ * ------------------------------------------------------------------ */
+
+function cleanupMessage(row: any): string {
+  switch (row.status) {
+    case "scanning":
+      return `กำลังตรวจ ${row.groups_scanned}/${row.groups_total} กลุ่ม · พบค้าง ${row.pending_found} โพสต์`;
+    case "stopping-scan":
+      return "กำลังหยุดการตรวจหลังจบกลุ่มปัจจุบัน";
+    case "scanned":
+      return `ตรวจเสร็จ · ${row.groups_with_pending} กลุ่มมีของค้าง รวม ${row.pending_found} โพสต์`;
+    case "deleting":
+      return `กำลังลบ ${row.delete_groups_done}/${row.delete_groups_total} กลุ่ม · ลบแล้ว ${row.deleted_count} โพสต์`;
+    case "stopping-delete":
+      return "กำลังหยุดการลบหลังจบโพสต์ปัจจุบัน";
+    case "completed":
+      return `ลบเสร็จ ${row.deleted_count} โพสต์ · ข้าม ${row.skipped_count} · ไม่สำเร็จ ${row.failed_count}`;
+    case "failed":
+      return "การล้าง Pending ไม่สำเร็จ";
+    default:
+      return "พร้อมตรวจหาโพสต์ที่ค้างรออนุมัติ";
+  }
+}
+
+function rowToCleanupPost(row: any): PendingPostRecord {
+  return {
+    id: row.id,
+    cleanupGroupId: row.cleanup_group_id,
+    position: row.position,
+    snippet: row.snippet,
+    rawDate: row.raw_date,
+    postedAt: row.posted_at,
+    ageDays: row.age_days === null ? null : Number(row.age_days),
+    status: row.status,
+    evidencePath: row.evidence_path,
+    message: row.message,
+  };
+}
+
+function rowToCleanupGroup(row: any): PendingCleanupGroupRecord {
+  return {
+    id: row.id,
+    cleanupId: row.cleanup_id,
+    groupId: row.group_id,
+    externalId: row.external_id,
+    groupName: row.group_name,
+    groupUrl: row.group_url,
+    pendingCount: row.pending_count,
+    status: row.status,
+    selected: Boolean(row.selected),
+    deletedCount: row.deleted_count,
+    failedCount: row.failed_count,
+    skippedCount: row.skipped_count,
+    message: row.message,
+    scannedAt: row.scanned_at,
+  };
+}
+
+function rowToCleanup(row: any): PendingCleanupState {
+  return {
+    id: row.id,
+    status: row.status,
+    scope: row.scope,
+    deleteMode: row.delete_mode,
+    olderThanDays: row.older_than_days,
+    startedAt: row.started_at,
+    scanFinishedAt: row.scan_finished_at,
+    finishedAt: row.finished_at,
+    groupsTotal: row.groups_total,
+    groupsScanned: row.groups_scanned,
+    groupsWithPending: row.groups_with_pending,
+    pendingFound: row.pending_found,
+    deleteGroupsTotal: row.delete_groups_total,
+    deleteGroupsDone: row.delete_groups_done,
+    deletedCount: row.deleted_count,
+    failedCount: row.failed_count,
+    skippedCount: row.skipped_count,
+    message: cleanupMessage(row),
+    snapshotPath: row.snapshot_path,
+    error: row.error,
+  };
+}
+
+export function createPendingCleanupRun(input: {
+  scope: PendingCleanupScope;
+  deleteMode: PendingDeleteMode;
+  olderThanDays: number;
+  groupsTotal: number;
+}): PendingCleanupState {
+  const id = randomUUID();
+  db.prepare(
+    `INSERT INTO pending_cleanup_runs(id, status, scope, delete_mode, older_than_days, started_at, groups_total)
+     VALUES (?, 'scanning', ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.scope,
+    input.deleteMode,
+    input.olderThanDays,
+    new Date().toISOString(),
+    input.groupsTotal,
+  );
+  return rowToCleanup(
+    db.prepare("SELECT * FROM pending_cleanup_runs WHERE id = ?").get(id),
+  );
+}
+
+export function updatePendingCleanupRun(
+  id: string,
+  patch: Partial<{
+    status: PendingCleanupStatus;
+    scanFinishedAt: string | null;
+    finishedAt: string | null;
+    groupsTotal: number;
+    groupsScanned: number;
+    groupsWithPending: number;
+    pendingFound: number;
+    deleteGroupsTotal: number;
+    deleteGroupsDone: number;
+    deletedCount: number;
+    failedCount: number;
+    skippedCount: number;
+    deleteMode: PendingDeleteMode;
+    olderThanDays: number;
+    snapshotPath: string | null;
+    error: string | null;
+  }>,
+): void {
+  const columns: Record<string, string> = {
+    status: "status",
+    scanFinishedAt: "scan_finished_at",
+    finishedAt: "finished_at",
+    groupsTotal: "groups_total",
+    groupsScanned: "groups_scanned",
+    groupsWithPending: "groups_with_pending",
+    pendingFound: "pending_found",
+    deleteGroupsTotal: "delete_groups_total",
+    deleteGroupsDone: "delete_groups_done",
+    deletedCount: "deleted_count",
+    failedCount: "failed_count",
+    skippedCount: "skipped_count",
+    deleteMode: "delete_mode",
+    olderThanDays: "older_than_days",
+    snapshotPath: "snapshot_path",
+    error: "error",
+  };
+  const assignments: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, column] of Object.entries(columns)) {
+    if (!(key in patch)) continue;
+    assignments.push(`${column} = ?`);
+    values.push((patch as Record<string, unknown>)[key]);
+  }
+  if (!assignments.length) return;
+  values.push(id);
+  db.prepare(
+    `UPDATE pending_cleanup_runs SET ${assignments.join(", ")} WHERE id = ?`,
+  ).run(...values);
+}
+
+export function getLatestPendingCleanupRun(): PendingCleanupState | null {
+  const row = db
+    .prepare("SELECT * FROM pending_cleanup_runs ORDER BY started_at DESC LIMIT 1")
+    .get();
+  return row ? rowToCleanup(row) : null;
+}
+
+export function addPendingCleanupGroups(
+  cleanupId: string,
+  groups: Array<{ groupId: string; externalId: string; name: string; url: string }>,
+): PendingCleanupGroupRecord[] {
+  const insert = db.prepare(
+    `INSERT INTO pending_cleanup_groups(id, cleanup_id, group_id, external_id, group_name, group_url, position)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  db.transaction(() => {
+    groups.forEach((group, index) => {
+      insert.run(
+        randomUUID(),
+        cleanupId,
+        group.groupId,
+        group.externalId,
+        group.name,
+        group.url,
+        index,
+      );
+    });
+  })();
+  return listPendingCleanupGroups(cleanupId);
+}
+
+export function listPendingCleanupGroups(
+  cleanupId: string,
+  options: { withPosts?: boolean; onlyWithPending?: boolean } = {},
+): PendingCleanupGroupRecord[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM pending_cleanup_groups
+       WHERE cleanup_id = ?${options.onlyWithPending ? " AND pending_count > 0" : ""}
+       ORDER BY pending_count DESC, position ASC`,
+    )
+    .all(cleanupId) as any[];
+  const groups = rows.map(rowToCleanupGroup);
+  if (!options.withPosts) return groups;
+  const postStatement = db.prepare(
+    "SELECT * FROM pending_cleanup_posts WHERE cleanup_group_id = ? ORDER BY position ASC",
+  );
+  return groups.map((group) => ({
+    ...group,
+    posts: (postStatement.all(group.id) as any[]).map(rowToCleanupPost),
+  }));
+}
+
+export function getPendingCleanupGroup(
+  id: string,
+): PendingCleanupGroupRecord | null {
+  const row = db
+    .prepare("SELECT * FROM pending_cleanup_groups WHERE id = ?")
+    .get(id);
+  return row ? rowToCleanupGroup(row) : null;
+}
+
+export function updatePendingCleanupGroup(
+  id: string,
+  patch: Partial<{
+    pendingCount: number;
+    status: PendingCleanupGroupStatus;
+    selected: boolean;
+    deletedCount: number;
+    failedCount: number;
+    skippedCount: number;
+    message: string;
+    scannedAt: string | null;
+  }>,
+): void {
+  const columns: Record<string, string> = {
+    pendingCount: "pending_count",
+    status: "status",
+    selected: "selected",
+    deletedCount: "deleted_count",
+    failedCount: "failed_count",
+    skippedCount: "skipped_count",
+    message: "message",
+    scannedAt: "scanned_at",
+  };
+  const assignments: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, column] of Object.entries(columns)) {
+    if (!(key in patch)) continue;
+    assignments.push(`${column} = ?`);
+    const raw = (patch as Record<string, unknown>)[key];
+    values.push(key === "selected" ? (raw ? 1 : 0) : raw);
+  }
+  if (!assignments.length) return;
+  values.push(id);
+  db.prepare(
+    `UPDATE pending_cleanup_groups SET ${assignments.join(", ")} WHERE id = ?`,
+  ).run(...values);
+}
+
+export function setPendingCleanupSelection(
+  cleanupId: string,
+  selectedGroupIds: string[],
+): number {
+  const unique = [...new Set(selectedGroupIds)];
+  db.transaction(() => {
+    db.prepare(
+      "UPDATE pending_cleanup_groups SET selected = 0 WHERE cleanup_id = ?",
+    ).run(cleanupId);
+    const mark = db.prepare(
+      "UPDATE pending_cleanup_groups SET selected = 1 WHERE cleanup_id = ? AND id = ? AND pending_count > 0",
+    );
+    for (const id of unique) mark.run(cleanupId, id);
+  })();
+  const row = db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM pending_cleanup_groups WHERE cleanup_id = ? AND selected = 1",
+    )
+    .get(cleanupId) as { count: number };
+  return row.count;
+}
+
+export function replacePendingCleanupPosts(
+  cleanupGroupId: string,
+  posts: Array<{
+    position: number;
+    snippet: string;
+    rawDate: string;
+    postedAt: string | null;
+    ageDays: number | null;
+  }>,
+): void {
+  const insert = db.prepare(
+    `INSERT INTO pending_cleanup_posts(id, cleanup_group_id, position, snippet, raw_date, posted_at, age_days)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  db.transaction(() => {
+    db.prepare("DELETE FROM pending_cleanup_posts WHERE cleanup_group_id = ?").run(
+      cleanupGroupId,
+    );
+    for (const post of posts) {
+      insert.run(
+        randomUUID(),
+        cleanupGroupId,
+        post.position,
+        post.snippet,
+        post.rawDate,
+        post.postedAt,
+        post.ageDays,
+      );
+    }
+  })();
+}
+
+export function listPendingCleanupPosts(
+  cleanupGroupId: string,
+): PendingPostRecord[] {
+  return (
+    db
+      .prepare(
+        "SELECT * FROM pending_cleanup_posts WHERE cleanup_group_id = ? ORDER BY position ASC",
+      )
+      .all(cleanupGroupId) as any[]
+  ).map(rowToCleanupPost);
+}
+
+export function updatePendingCleanupPost(
+  id: string,
+  patch: Partial<{
+    status: PendingPostStatus;
+    evidencePath: string | null;
+    message: string;
+  }>,
+): void {
+  const columns: Record<string, string> = {
+    status: "status",
+    evidencePath: "evidence_path",
+    message: "message",
+  };
+  const assignments: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, column] of Object.entries(columns)) {
+    if (!(key in patch)) continue;
+    assignments.push(`${column} = ?`);
+    values.push((patch as Record<string, unknown>)[key]);
+  }
+  if (!assignments.length) return;
+  values.push(id);
+  db.prepare(
+    `UPDATE pending_cleanup_posts SET ${assignments.join(", ")} WHERE id = ?`,
+  ).run(...values);
+}
+
+/**
+ * Groups eligible for a pending sweep. "known-pending" leans on run_targets that
+ * Facebook told us were awaiting approval, which is a hint rather than the truth:
+ * an admin may have approved or declined since, so the sweep still opens each group.
+ */
+export function listGroupsForPendingScope(
+  scope: PendingCleanupScope,
+  groupIds: string[] = [],
+): GroupRecord[] {
+  if (scope === "custom") {
+    if (!groupIds.length) return [];
+    const placeholders = groupIds.map(() => "?").join(", ");
+    return (
+      db
+        .prepare(
+          `SELECT * FROM groups_list
+           WHERE id IN (${placeholders}) AND external_id IS NOT NULL AND external_id <> ''
+           ORDER BY name COLLATE NOCASE`,
+        )
+        .all(...groupIds) as any[]
+    ).map(rowToGroup);
+  }
+  if (scope === "known-pending") {
+    return (
+      db
+        .prepare(
+          `SELECT g.* FROM groups_list g
+           WHERE g.external_id IS NOT NULL AND g.external_id <> ''
+             AND EXISTS (
+               SELECT 1 FROM run_targets t
+               WHERE t.group_id = g.id AND t.status = 'pending_review'
+             )
+           ORDER BY g.name COLLATE NOCASE`,
+        )
+        .all() as any[]
+    ).map(rowToGroup);
+  }
+  if (scope === "posted") {
+    return (
+      db
+        .prepare(
+          `SELECT * FROM groups_list
+           WHERE external_id IS NOT NULL AND external_id <> '' AND last_posted_at IS NOT NULL
+           ORDER BY name COLLATE NOCASE`,
+        )
+        .all() as any[]
+    ).map(rowToGroup);
+  }
+  return (
+    db
+      .prepare(
+        `SELECT * FROM groups_list
+         WHERE external_id IS NOT NULL AND external_id <> '' AND active = 1
+         ORDER BY name COLLATE NOCASE`,
+      )
+      .all() as any[]
+  ).map(rowToGroup);
+}
+
+export function countGroupsForPendingScopes(): Record<
+  "knownPending" | "posted" | "all",
+  number
+> {
+  const single = (sql: string) => (db.prepare(sql).get() as { c: number }).c;
+  return {
+    knownPending: single(
+      `SELECT COUNT(*) AS c FROM groups_list g
+       WHERE g.external_id IS NOT NULL AND g.external_id <> ''
+         AND EXISTS (SELECT 1 FROM run_targets t WHERE t.group_id = g.id AND t.status = 'pending_review')`,
+    ),
+    posted: single(
+      `SELECT COUNT(*) AS c FROM groups_list
+       WHERE external_id IS NOT NULL AND external_id <> '' AND last_posted_at IS NOT NULL`,
+    ),
+    all: single(
+      `SELECT COUNT(*) AS c FROM groups_list
+       WHERE external_id IS NOT NULL AND external_id <> '' AND active = 1`,
+    ),
+  };
+}
+
+export function getPendingCleanupPost(id: string): PendingPostRecord | null {
+  const row = db.prepare("SELECT * FROM pending_cleanup_posts WHERE id = ?").get(id);
+  return row ? rowToCleanupPost(row) : null;
 }

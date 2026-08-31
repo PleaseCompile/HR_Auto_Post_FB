@@ -13,6 +13,7 @@ export const uploadDirectory = path.join(dataDirectory, "uploads");
 export const evidenceDirectory = path.join(dataDirectory, "evidence");
 export const manualEvidenceDirectory = path.join(evidenceDirectory, "manual");
 export const groupScanDirectory = path.join(dataDirectory, "group-scans");
+export const pendingCleanupDirectory = path.join(dataDirectory, "pending-cleanup");
 export const browserProfileDirectory = path.join(dataDirectory, "browser-profile");
 export const browserSessionLockPath = path.join(dataDirectory, "browser-session.lock");
 export const browserEventLogPath = path.join(dataDirectory, "browser-events.jsonl");
@@ -25,6 +26,7 @@ for (const directory of [
   evidenceDirectory,
   manualEvidenceDirectory,
   groupScanDirectory,
+  pendingCleanupDirectory,
   browserProfileDirectory,
 ]) {
   fs.mkdirSync(directory, { recursive: true });

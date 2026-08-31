@@ -6,6 +6,15 @@ const state = {
   runs: [],
   manualEvidence: [],
   groupScan: null,
+  pendingCleanup: null,
+  pendingScope: "known-pending",
+  pendingCustomSearch: "",
+  pendingCustomSelected: new Set(),
+  pendingSelected: new Set(),
+  pendingSelectionInitFor: null,
+  pendingExpanded: new Set(),
+  pendingDeleteMode: "all",
+  pendingOlderThanDays: 7,
   selectedGroups: new Set(),
   editingDraftId: null,
   pendingFiles: [],
@@ -37,6 +46,7 @@ const routes = {
   compose: ["Content studio", "สร้างและเตรียมโพสต์"],
   groups: ["Audience workspace", "คลังกลุ่ม"],
   runs: ["Posting queue", "คิวและการทำงาน"],
+  pending: ["Pending cleanup", "ล้างโพสต์ที่รออนุมัติ"],
   history: ["Evidence archive", "หลักฐานการโพสต์"],
   settings: ["Local security", "ตั้งค่าและ Session"],
 };
@@ -257,14 +267,16 @@ async function api(url, options = {}) {
 }
 
 async function refreshAll() {
-  const [dashboard, drafts, groups, runs, groupScan, manualEvidence] = await Promise.all([
-    api("/api/dashboard"),
-    api("/api/drafts"),
-    api("/api/groups"),
-    api("/api/runs"),
-    api("/api/groups/scan"),
-    api("/api/manual-evidence"),
-  ]);
+  const [dashboard, drafts, groups, runs, groupScan, manualEvidence, pendingCleanup] =
+    await Promise.all([
+      api("/api/dashboard"),
+      api("/api/drafts"),
+      api("/api/groups"),
+      api("/api/runs"),
+      api("/api/groups/scan"),
+      api("/api/manual-evidence"),
+      api("/api/pending-cleanup"),
+    ]);
   state.dashboard = dashboard;
   state.drafts = drafts;
   state.groups = groups;
@@ -272,6 +284,7 @@ async function refreshAll() {
   pruneRunTargetSelection();
   state.groupScan = groupScan;
   state.manualEvidence = manualEvidence;
+  state.pendingCleanup = pendingCleanup;
   renderSession(dashboard.session);
 }
 
@@ -309,6 +322,7 @@ function render() {
     compose: renderCompose,
     groups: renderGroups,
     runs: renderRuns,
+    pending: renderPendingCleanup,
     history: renderHistory,
     settings: renderSettings,
   }[state.route];
@@ -800,6 +814,400 @@ function renderScanDialog() {
       <button class="button button-ghost" data-action="close-scan">${scan.status === "completed" ? "ปิดและดูคลังกลุ่ม" : "ยกเลิก"}</button>
       <button class="button button-primary" data-action="start-scan" ${sessionReady ? "" : "disabled"}>${scan.status === "completed" || scan.status === "failed" ? "สแกนอีกครั้ง" : "เริ่มสแกน"}</button>
     </div>
+  `;
+}
+
+const pendingScopeLabels = {
+  "known-pending": "กลุ่มที่ระบบรู้ว่ามีของค้าง",
+  posted: "กลุ่มที่เคยโพสต์",
+  all: "ทุกกลุ่มในคลัง",
+  custom: "เลือกเองจากคลังกลุ่ม",
+};
+
+const pendingGroupStatusLabels = {
+  queued: "รอตรวจ",
+  scanning: "กำลังตรวจ",
+  scanned: "ตรวจแล้ว",
+  deleting: "กำลังลบ",
+  done: "ลบเสร็จ",
+  failed: "ไม่สำเร็จ",
+  skipped: "ข้าม",
+};
+
+const pendingPostStatusLabels = {
+  found: "รอลบ",
+  deleted: "ลบแล้ว",
+  failed: "ไม่สำเร็จ",
+  skipped: "ข้ามไว้",
+};
+
+function emptyPendingCleanup() {
+  return {
+    id: null,
+    status: "idle",
+    scope: "known-pending",
+    deleteMode: "all",
+    olderThanDays: 7,
+    groupsTotal: 0,
+    groupsScanned: 0,
+    groupsWithPending: 0,
+    pendingFound: 0,
+    deleteGroupsTotal: 0,
+    deleteGroupsDone: 0,
+    deletedCount: 0,
+    failedCount: 0,
+    skippedCount: 0,
+    message: "พร้อมตรวจหาโพสต์ที่ค้างรออนุมัติ",
+    snapshotPath: null,
+    error: null,
+    groups: [],
+    scopeCounts: { knownPending: 0, posted: 0, all: 0 },
+  };
+}
+
+/**
+ * Seeds the checkbox selection from whatever the sweep marked, but only once per
+ * cleanup run so a poll cannot undo the boxes the user just ticked.
+ */
+function syncPendingSelection(cleanup) {
+  if (!cleanup.id || state.pendingSelectionInitFor === cleanup.id) return;
+  if (!(cleanup.groups || []).length) return;
+  state.pendingSelected = new Set(
+    (cleanup.groups || [])
+      .filter((group) => group.selected && group.pendingCount > 0)
+      .map((group) => group.id),
+  );
+  state.pendingSelectionInitFor = cleanup.id;
+}
+
+function pendingCustomGroups() {
+  const query = state.pendingCustomSearch.trim().toLowerCase();
+  const pool = state.groups.filter((group) => group.externalId);
+  if (!query) return pool.slice(0, 200);
+  return pool
+    .filter((group) =>
+      `${group.name} ${group.province} ${(group.tags || []).join(" ")}`
+        .toLowerCase()
+        .includes(query),
+    )
+    .slice(0, 200);
+}
+
+function renderPendingSetup(cleanup, sessionReady) {
+  const counts = cleanup.scopeCounts || { knownPending: 0, posted: 0, all: 0 };
+  const scope = state.pendingScope;
+  const scopeCount =
+    scope === "known-pending"
+      ? counts.knownPending
+      : scope === "posted"
+        ? counts.posted
+        : scope === "all"
+          ? counts.all
+          : state.pendingCustomSelected.size;
+  const minutes = Math.max(1, Math.round((scopeCount * 8) / 60));
+
+  return `
+    <section class="panel pending-setup">
+      <div class="panel-head">
+        <div>
+          <h3>1 · เลือกขอบเขตแล้วตรวจหาโพสต์ค้าง</h3>
+          <p class="muted">ระบบจะเปิดหน้า “โพสต์ของฉันที่รออนุมัติ” ของแต่ละกลุ่มเพื่อนับของค้าง ยังไม่ลบอะไรในขั้นนี้</p>
+        </div>
+      </div>
+      <div class="pending-scope-grid">
+        ${[
+          ["known-pending", counts.knownPending, "เร็วที่สุด · ใช้ประวัติการโพสต์เป็นตัวตั้ง"],
+          ["posted", counts.posted, "ครอบคลุมกว่า · รวมกลุ่มที่ระบบไม่ได้บันทึกสถานะ"],
+          ["all", counts.all, "กวาดครบทุกกลุ่ม ไม่มีตกหล่น"],
+          ["custom", state.pendingCustomSelected.size, "ค้นหาและติ๊กเลือกเอง"],
+        ]
+          .map(
+            ([value, count, hint]) => `
+              <label class="pending-scope-card ${state.pendingScope === value ? "is-active" : ""}">
+                <input type="radio" name="pendingScope" value="${value}" ${
+                  state.pendingScope === value ? "checked" : ""
+                } />
+                <div>
+                  <strong>${escapeHtml(pendingScopeLabels[value])}</strong>
+                  <span class="pending-scope-count">${Number(count).toLocaleString("th-TH")} กลุ่ม</span>
+                  <span class="muted">${escapeHtml(hint)}</span>
+                </div>
+              </label>
+            `,
+          )
+          .join("")}
+      </div>
+      ${
+        scope === "custom"
+          ? `
+            <div class="pending-custom">
+              <label class="search-box">
+                <input id="pendingCustomSearch" type="search" autocomplete="off" placeholder="ค้นหากลุ่มที่ต้องการตรวจ" value="${escapeHtml(state.pendingCustomSearch)}" />
+              </label>
+              <div class="pending-custom-list">
+                ${
+                  pendingCustomGroups()
+                    .map(
+                      (group) => `
+                        <label class="pending-custom-item">
+                          <input type="checkbox" data-action="toggle-pending-custom" data-id="${group.id}" ${
+                            state.pendingCustomSelected.has(group.id) ? "checked" : ""
+                          } />
+                          <span>${escapeHtml(group.name)}</span>
+                          <span class="muted">${escapeHtml(group.province || "—")}</span>
+                        </label>
+                      `,
+                    )
+                    .join("") || `<p class="muted">ไม่พบกลุ่มที่ตรงกับคำค้น</p>`
+                }
+              </div>
+              <p class="muted">เลือกแล้ว ${state.pendingCustomSelected.size.toLocaleString("th-TH")} กลุ่ม · แสดงสูงสุด 200 รายการต่อการค้นหา</p>
+            </div>
+          `
+          : ""
+      }
+      <div class="pending-actions">
+        <span class="muted">${
+          scopeCount
+            ? `จะเปิดตรวจ ${scopeCount.toLocaleString("th-TH")} กลุ่ม · ใช้เวลาประมาณ ${minutes} นาที`
+            : "ยังไม่มีกลุ่มในขอบเขตนี้"
+        }</span>
+        <button class="button button-primary" data-action="start-pending-scan" ${
+          sessionReady && scopeCount ? "" : "disabled"
+        }>เริ่มตรวจหาโพสต์ค้าง</button>
+      </div>
+      ${sessionReady ? "" : `<p class="muted">ต้องเชื่อมต่อและล็อกอิน Facebook ก่อนจึงจะเริ่มตรวจได้</p>`}
+    </section>
+  `;
+}
+
+function renderPendingProgress(cleanup, mode) {
+  const scanning = mode === "scan";
+  const done = scanning ? cleanup.groupsScanned : cleanup.deleteGroupsDone;
+  const total = scanning ? cleanup.groupsTotal : cleanup.deleteGroupsTotal;
+  const percent = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  return `
+    <section class="panel pending-progress">
+      <div class="panel-head">
+        <div>
+          <h3>${scanning ? "กำลังตรวจหาโพสต์ค้าง" : "กำลังลบโพสต์ค้าง"}</h3>
+          <p class="muted">${escapeHtml(cleanup.message)}</p>
+        </div>
+        <button class="button button-danger" data-action="${
+          scanning ? "stop-pending-scan" : "stop-pending-delete"
+        }" ${cleanup.status.startsWith("stopping") ? "disabled" : ""}>
+          ${cleanup.status.startsWith("stopping") ? "กำลังหยุด…" : "หยุดหลังจบรายการปัจจุบัน"}
+        </button>
+      </div>
+      <div class="pending-bar"><span style="width:${percent}%"></span></div>
+      <div class="scan-metrics">
+        <div class="scan-metric"><span>${scanning ? "ตรวจแล้ว" : "ลบแล้ว (กลุ่ม)"}</span><strong>${done}/${total}</strong></div>
+        ${
+          scanning
+            ? `<div class="scan-metric"><span>กลุ่มที่มีของค้าง</span><strong>${cleanup.groupsWithPending}</strong></div>
+               <div class="scan-metric"><span>โพสต์ค้างที่พบ</span><strong>${cleanup.pendingFound}</strong></div>`
+            : `<div class="scan-metric"><span>ลบสำเร็จ</span><strong>${cleanup.deletedCount}</strong></div>
+               <div class="scan-metric"><span>ข้ามไว้</span><strong>${cleanup.skippedCount}</strong></div>
+               <div class="scan-metric"><span>ไม่สำเร็จ</span><strong>${cleanup.failedCount}</strong></div>`
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderPendingPostRows(group) {
+  const posts = group.posts || [];
+  if (!posts.length) {
+    return `<p class="muted">ไม่มีรายละเอียดโพสต์ที่บันทึกไว้</p>`;
+  }
+  return `
+    <ul class="pending-post-list">
+      ${posts
+        .map(
+          (post) => `
+            <li class="pending-post is-${post.status}">
+              <div class="pending-post-main">
+                <span class="pending-post-snippet">${escapeHtml(truncate(post.snippet || "(ไม่มีข้อความ)", 110))}</span>
+                <span class="muted">${escapeHtml(post.rawDate || "อ่านวันที่ไม่ได้")}${
+                  post.ageDays === null || post.ageDays === undefined
+                    ? ""
+                    : ` · อายุ ${Number(post.ageDays).toFixed(1)} วัน`
+                }</span>
+              </div>
+              <div class="pending-post-side">
+                <span class="pill pill-${post.status}">${escapeHtml(pendingPostStatusLabels[post.status] || post.status)}</span>
+                ${
+                  post.evidencePath
+                    ? `<a class="button button-small button-ghost" href="/api/pending-cleanup/posts/${post.id}/evidence" target="_blank" rel="noopener">ดูหลักฐาน</a>`
+                    : ""
+                }
+              </div>
+              ${post.message ? `<span class="pending-post-message muted">${escapeHtml(post.message)}</span>` : ""}
+            </li>
+          `,
+        )
+        .join("")}
+    </ul>
+  `;
+}
+
+function renderPendingResults(cleanup, sessionReady) {
+  const groups = (cleanup.groups || []).filter((group) => group.pendingCount > 0);
+  const failedGroups = (cleanup.groups || []).filter((group) => group.status === "failed");
+  const selectedIds = state.pendingSelected;
+  const selectedGroups = groups.filter((group) => selectedIds.has(group.id));
+  const selectedPosts = selectedGroups.reduce(
+    (total, group) => total + group.pendingCount,
+    0,
+  );
+  const deleting = ["deleting", "stopping-delete"].includes(cleanup.status);
+
+  if (!groups.length) {
+    return `
+      <section class="panel">
+        <div class="empty-state">
+          <h2>ไม่พบโพสต์ค้างรออนุมัติ</h2>
+          <p>ตรวจ ${cleanup.groupsScanned.toLocaleString("th-TH")} กลุ่มแล้วไม่มีของค้างให้ลบ</p>
+        </div>
+        ${
+          failedGroups.length
+            ? `<p class="muted">มี ${failedGroups.length} กลุ่มที่เปิดตรวจไม่สำเร็จ — ดูรายละเอียดใน JSON snapshot</p>`
+            : ""
+        }
+      </section>
+    `;
+  }
+
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h3>2 · เลือกกลุ่มที่จะลบ</h3>
+          <p class="muted">พบของค้าง ${cleanup.pendingFound.toLocaleString("th-TH")} โพสต์ ใน ${groups.length.toLocaleString("th-TH")} กลุ่ม${
+            failedGroups.length ? ` · เปิดไม่สำเร็จ ${failedGroups.length} กลุ่ม` : ""
+          }</p>
+        </div>
+        <button class="button button-ghost button-small" data-action="rescan-pending" ${deleting ? "disabled" : ""}>ตรวจใหม่</button>
+      </div>
+      <div class="data-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" data-action="toggle-pending-all" ${
+                selectedGroups.length === groups.length ? "checked" : ""
+              } ${deleting ? "disabled" : ""} aria-label="เลือกทุกกลุ่มที่มีของค้าง" /></th>
+              <th style="width:44%">กลุ่ม</th>
+              <th style="width:12%">ค้างอยู่</th>
+              <th style="width:16%">สถานะ</th>
+              <th>ผลการลบ</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${groups
+              .map(
+                (group) => `
+                  <tr>
+                    <td class="col-check"><input type="checkbox" data-action="toggle-pending-group" data-id="${group.id}" ${
+                      selectedIds.has(group.id) ? "checked" : ""
+                    } ${deleting ? "disabled" : ""} /></td>
+                    <td>
+                      <button class="link-button" data-action="expand-pending-group" data-id="${group.id}">
+                        ${state.pendingExpanded.has(group.id) ? "▾" : "▸"} ${escapeHtml(group.groupName)}
+                      </button>
+                      <a class="muted pending-group-link" href="${escapeHtml(group.groupUrl)}my_pending_content" target="_blank" rel="noopener">เปิดใน Facebook</a>
+                    </td>
+                    <td><strong>${group.pendingCount}</strong></td>
+                    <td><span class="pill pill-${group.status}">${escapeHtml(pendingGroupStatusLabels[group.status] || group.status)}</span></td>
+                    <td class="muted">${escapeHtml(group.message || "—")}</td>
+                  </tr>
+                  ${
+                    state.pendingExpanded.has(group.id)
+                      ? `<tr class="pending-detail-row"><td colspan="5">${renderPendingPostRows(group)}</td></tr>`
+                      : ""
+                  }
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel pending-danger">
+      <div class="panel-head">
+        <div>
+          <h3>3 · ยืนยันและลบ</h3>
+          <p class="muted">เลือกไว้ ${selectedGroups.length.toLocaleString("th-TH")} กลุ่ม รวมสูงสุด ${selectedPosts.toLocaleString("th-TH")} โพสต์</p>
+        </div>
+      </div>
+      <div class="pending-delete-controls">
+        <label>
+          <span class="muted">ขอบเขตการลบ</span>
+          <select id="pendingDeleteMode" style="width:260px" ${deleting ? "disabled" : ""}>
+            <option value="all" ${state.pendingDeleteMode === "all" ? "selected" : ""}>ลบทั้งหมดทุกโพสต์</option>
+            <option value="older-than" ${state.pendingDeleteMode === "older-than" ? "selected" : ""}>ลบเฉพาะที่เก่ากว่าที่กำหนด</option>
+          </select>
+        </label>
+        ${
+          state.pendingDeleteMode === "older-than"
+            ? `<label>
+                 <span class="muted">เก่ากว่า (วัน)</span>
+                 <input id="pendingOlderThanDays" type="number" min="0" max="365" step="1" value="${state.pendingOlderThanDays}" style="width:110px" ${deleting ? "disabled" : ""} />
+               </label>`
+            : ""
+        }
+      </div>
+      ${
+        state.pendingDeleteMode === "older-than"
+          ? `<p class="muted">โพสต์ที่ระบบอ่านวันที่ไม่ได้จะถูก <strong>ข้าม</strong> ไม่ลบ เพื่อไม่ให้ลบผิดตัว</p>`
+          : ""
+      }
+      <div class="pending-warning">
+        <strong>ลบแล้วกู้คืนไม่ได้</strong>
+        <span>Facebook ไม่มีถังขยะสำหรับโพสต์ที่รออนุมัติ ระบบจะถ่ายภาพทุกโพสต์เก็บไว้ใน <code>data/pending-cleanup/</code> ก่อนกดลบเสมอ</span>
+      </div>
+      <label class="scan-consent">
+        <input type="checkbox" id="pendingAck" ${deleting ? "disabled" : ""} />
+        <span>ฉันเข้าใจว่าโพสต์ที่ลบจะหายถาวรและตรวจรายการที่เลือกแล้ว</span>
+      </label>
+      <div class="pending-actions">
+        ${cleanup.snapshotPath ? `<a class="button button-ghost" href="/api/pending-cleanup/snapshot">ดาวน์โหลด JSON</a>` : ""}
+        <button class="button button-danger" data-action="start-pending-delete" ${
+          sessionReady && selectedGroups.length && !deleting ? "" : "disabled"
+        }>เริ่มลบ (สูงสุด ${selectedPosts.toLocaleString("th-TH")} โพสต์)</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderPendingCleanup() {
+  const cleanup = { ...emptyPendingCleanup(), ...(state.pendingCleanup || {}) };
+  syncPendingSelection(cleanup);
+  const sessionReady = Boolean(state.dashboard?.session?.authenticated);
+  const scanning = ["scanning", "stopping-scan"].includes(cleanup.status);
+  const deleting = ["deleting", "stopping-delete"].includes(cleanup.status);
+  const hasResults = Boolean(cleanup.id) && (cleanup.groups || []).length > 0;
+
+  return `
+    <div class="page-header">
+      <div>
+        <h2>ล้างโพสต์ที่รออนุมัติ</h2>
+        <p class="muted">ไล่เช็กทุกกลุ่มว่ามีโพสต์ค้างรอแอดมินอนุมัติกี่อัน แล้วเลือกลบทีเดียว</p>
+      </div>
+    </div>
+    ${
+      cleanup.error
+        ? `<div class="alert alert-danger"><strong>ครั้งล่าสุดไม่สำเร็จ</strong><span>${escapeHtml(cleanup.error)}</span></div>`
+        : ""
+    }
+    ${
+      cleanup.status === "completed"
+        ? `<div class="alert alert-success"><strong>ล้างเสร็จแล้ว</strong><span>${escapeHtml(cleanup.message)}</span></div>`
+        : ""
+    }
+    ${scanning || deleting ? renderPendingProgress(cleanup, scanning ? "scan" : "delete") : ""}
+    ${!scanning && !deleting ? renderPendingSetup(cleanup, sessionReady) : ""}
+    ${hasResults && !scanning ? renderPendingResults(cleanup, sessionReady) : ""}
   `;
 }
 
@@ -1596,6 +2004,35 @@ function bindRouteEvents() {
   if (state.route === "compose") bindComposeEvents();
   if (state.route === "groups") bindGroupEvents();
   if (state.route === "history") bindHistoryEvents();
+  if (state.route === "pending") bindPendingEvents();
+}
+
+function bindPendingEvents() {
+  document.querySelectorAll('input[name="pendingScope"]').forEach((input) => {
+    input.addEventListener("change", (event) => {
+      state.pendingScope = event.target.value;
+      render();
+    });
+  });
+  const search = document.querySelector("#pendingCustomSearch");
+  search?.addEventListener("input", (event) => {
+    state.pendingCustomSearch = event.target.value;
+    render();
+    const restored = document.querySelector("#pendingCustomSearch");
+    restored?.focus();
+    restored?.setSelectionRange(restored.value.length, restored.value.length);
+  });
+  document.querySelector("#pendingDeleteMode")?.addEventListener("change", (event) => {
+    state.pendingDeleteMode = event.target.value;
+    render();
+  });
+  document.querySelector("#pendingOlderThanDays")?.addEventListener("change", (event) => {
+    const value = Number(event.target.value);
+    state.pendingOlderThanDays = Number.isFinite(value)
+      ? Math.min(365, Math.max(0, Math.round(value)))
+      : 7;
+    render();
+  });
 }
 
 function bindComposeEvents() {
@@ -1866,6 +2303,92 @@ async function handleAction(button, options = {}) {
       navigate("runs");
     } else if (action === "go-groups") {
       navigate("groups");
+    } else if (action === "go-pending") {
+      navigate("pending");
+    } else if (action === "toggle-pending-custom") {
+      if (button.checked) state.pendingCustomSelected.add(button.dataset.id);
+      else state.pendingCustomSelected.delete(button.dataset.id);
+      render();
+    } else if (action === "toggle-pending-group") {
+      if (button.checked) state.pendingSelected.add(button.dataset.id);
+      else state.pendingSelected.delete(button.dataset.id);
+      render();
+    } else if (action === "toggle-pending-all") {
+      const groups = (state.pendingCleanup?.groups || []).filter(
+        (group) => group.pendingCount > 0,
+      );
+      if (button.checked) for (const group of groups) state.pendingSelected.add(group.id);
+      else for (const group of groups) state.pendingSelected.delete(group.id);
+      render();
+    } else if (action === "expand-pending-group") {
+      const id = button.dataset.id;
+      if (state.pendingExpanded.has(id)) state.pendingExpanded.delete(id);
+      else state.pendingExpanded.add(id);
+      render();
+    } else if (action === "start-pending-scan" || action === "rescan-pending") {
+      const scope = action === "rescan-pending" ? state.pendingCleanup?.scope || state.pendingScope : state.pendingScope;
+      await api("/api/pending-cleanup/scan/start", {
+        method: "POST",
+        body: JSON.stringify({
+          scope,
+          groupIds: scope === "custom" ? [...state.pendingCustomSelected] : [],
+          deleteMode: state.pendingDeleteMode,
+          olderThanDays: state.pendingOlderThanDays,
+        }),
+      });
+      state.pendingSelectionInitFor = null;
+      state.pendingExpanded.clear();
+      await refreshAll();
+      render();
+      toast("เริ่มตรวจหาโพสต์ค้างแล้ว");
+    } else if (action === "stop-pending-scan") {
+      await api("/api/pending-cleanup/scan/stop", { method: "POST" });
+      await refreshAll();
+      render();
+      toast("จะหยุดหลังตรวจกลุ่มปัจจุบันเสร็จ");
+    } else if (action === "stop-pending-delete") {
+      await api("/api/pending-cleanup/delete/stop", { method: "POST" });
+      await refreshAll();
+      render();
+      toast("จะหยุดหลังลบโพสต์ปัจจุบันเสร็จ");
+    } else if (action === "start-pending-delete") {
+      if (!document.querySelector("#pendingAck")?.checked) {
+        toast("กรุณาติ๊กยืนยันว่าเข้าใจว่าลบแล้วกู้คืนไม่ได้", "error");
+        return;
+      }
+      const selected = [...state.pendingSelected];
+      const groups = (state.pendingCleanup?.groups || []).filter((group) =>
+        state.pendingSelected.has(group.id),
+      );
+      const posts = groups.reduce((total, group) => total + group.pendingCount, 0);
+      const scopeNote =
+        state.pendingDeleteMode === "older-than"
+          ? `เฉพาะที่เก่ากว่า ${state.pendingOlderThanDays} วัน `
+          : "";
+      const typed = window.prompt(
+        `จะลบโพสต์ค้าง${scopeNote}สูงสุด ${posts} โพสต์ ใน ${groups.length} กลุ่ม และกู้คืนไม่ได้
+พิมพ์ ลบ เพื่อยืนยัน:`,
+        "",
+      );
+      if ((typed || "").trim() !== "ลบ") {
+        toast("ยกเลิกการลบแล้ว");
+        return;
+      }
+      await api("/api/pending-cleanup/select", {
+        method: "POST",
+        body: JSON.stringify({ groupIds: selected }),
+      });
+      await api("/api/pending-cleanup/delete/start", {
+        method: "POST",
+        body: JSON.stringify({
+          deleteMode: state.pendingDeleteMode,
+          olderThanDays: state.pendingOlderThanDays,
+          acknowledged: true,
+        }),
+      });
+      await refreshAll();
+      render();
+      toast("เริ่มลบโพสต์ค้างแล้ว");
     } else if (action === "delete-media") {
       await api(`/api/media/${button.dataset.id}`, { method: "DELETE" });
       await refreshAll();
@@ -2372,10 +2895,13 @@ async function pollAndRender() {
   try {
     await refreshAll();
     const editingHistoryFilter =
-      state.route === "history" &&
-      document.activeElement?.closest?.(".evidence-filter-panel");
+      (state.route === "history" &&
+        document.activeElement?.closest?.(".evidence-filter-panel")) ||
+      (state.route === "pending" &&
+        document.activeElement?.closest?.(".panel") &&
+        ["INPUT", "SELECT"].includes(document.activeElement?.tagName));
     if (
-      ["dashboard", "runs", "history", "settings"].includes(state.route) &&
+      ["dashboard", "runs", "history", "settings", "pending"].includes(state.route) &&
       !editingHistoryFilter
     ) {
       render();
