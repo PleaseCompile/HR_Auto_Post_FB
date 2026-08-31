@@ -235,17 +235,27 @@ export function ageInDays(postedAt: Date | null, now: Date = new Date()): number
 }
 
 /**
- * Stamps a marker on every pending card and returns what each one says. Anchoring on
- * the card's own Delete button is what makes this survive Facebook's class-name churn:
- * the button is the thing we need to click anyway.
+ * Stamps a marker on every pending post and returns what each one says.
+ *
+ * Facebook has no per-post container on this page: probing the live DOM showed the
+ * action row ("Edit Delete") sitting as a SIBLING of the post body, with the nearest
+ * shared ancestor already spanning every post on screen. So there is nothing to climb
+ * to — the Delete button itself is the only reliable per-post anchor, and the body is
+ * reached by stepping back to the previous sibling.
  */
 export async function markPendingCards(page: Page): Promise<PendingCardSnapshot[]> {
   return page.evaluate(
     ({ markerAttribute, deleteAttribute }) => {
-      const deleteLabel = /^(delete|ลบ)$/i;
-      const editLabel = /^(edit|แก้ไข)$/i;
       const clean = (value: string | null | undefined) =>
         (value || "").replace(/\s+/g, " ").trim();
+      // Some of these buttons carry their label only in aria-label; innerText is "".
+      const labelOf = (element: Element) =>
+        clean((element as HTMLElement).innerText) ||
+        clean(element.getAttribute("aria-label"));
+      const isDelete = (element: Element) => /^(delete|ลบ)$/i.test(labelOf(element));
+      const isEdit = (element: Element) => /^(edit|แก้ไข)$/i.test(labelOf(element));
+      const buttonsIn = (root: Element) =>
+        Array.from(root.querySelectorAll<HTMLElement>('[role="button"], button'));
 
       for (const stale of Array.from(
         document.querySelectorAll(`[${markerAttribute}], [${deleteAttribute}]`),
@@ -254,72 +264,71 @@ export async function markPendingCards(page: Page): Promise<PendingCardSnapshot[
         stale.removeAttribute(deleteAttribute);
       }
 
-      const isDeleteButton = (element: Element) => {
-        const label =
-          clean((element as HTMLElement).innerText) ||
-          clean(element.getAttribute("aria-label"));
-        return deleteLabel.test(label);
-      };
-
-      const buttons = Array.from(
+      const candidates = Array.from(
         document.querySelectorAll<HTMLElement>('[role="button"], button'),
       ).filter((button) => {
-        if (!button.getClientRects().length) return false;
-        // A leftover "Delete post?" modal also holds a Delete button. Counting it as a
-        // card would make the climb below walk all the way up to <body>.
-        if (button.closest('[role="dialog"]')) return false;
-        return isDeleteButton(button);
-      });
-
-      const results: Array<{ marker: number; snippet: string; rawDate: string }> = [];
-      const claimed = new Set<HTMLElement>();
-
-      buttons.forEach((button) => {
-        // Climb until the container also holds this card's Edit button, which marks
-        // the boundary of a single pending post rather than the whole feed.
-        let candidate: HTMLElement | null = button.parentElement;
-        let card: HTMLElement | null = null;
-        for (let depth = 0; candidate && depth < 12; depth += 1) {
-          if (candidate === document.body || candidate === document.documentElement) {
-            break;
-          }
-          const hasEdit = Array.from(
-            candidate.querySelectorAll<HTMLElement>('[role="button"], button'),
-          ).some((item) =>
-            editLabel.test(clean(item.innerText) || clean(item.getAttribute("aria-label"))),
-          );
-          if (hasEdit && clean(candidate.innerText).length > 40) {
-            // Exactly one Delete inside means this really is a single post. More than
-            // one means the climb overshot into a container holding several cards.
-            const deleteCount = Array.from(
-              candidate.querySelectorAll<HTMLElement>('[role="button"], button'),
-            ).filter(isDeleteButton).length;
-            if (deleteCount === 1) card = candidate;
-            break;
-          }
-          candidate = candidate.parentElement;
+        // Facebook renders a hidden duplicate of this button with a real 230x36 box,
+        // so measuring alone is not enough — computed visibility decides which copy
+        // can actually be clicked. `visibility` inherits, so this also rules out any
+        // button sitting inside a hidden ancestor.
+        const style = getComputedStyle(button);
+        if (
+          style.visibility === "hidden" ||
+          style.display === "none" ||
+          Number(style.opacity) === 0
+        ) {
+          return false;
         }
-        if (!card || claimed.has(card)) return;
-        claimed.add(card);
+        const box = button.getBoundingClientRect();
+        return (
+          box.width > 0 &&
+          box.height > 0 &&
+          // A "Delete post?" modal carries its own Delete button.
+          !button.closest('[role="dialog"]') &&
+          isDelete(button)
+        );
+      });
+      // role="button" nests inside role="button" here, so keep only the outer element
+      // of any such pair — otherwise one post would be counted twice.
+      const buttons = candidates.filter(
+        (button) => !candidates.some((other) => other !== button && other.contains(button)),
+      );
 
-        const marker = results.length;
-        card.setAttribute(markerAttribute, String(marker));
+      const datePattern =
+        /(\d{1,2}\s+\S+(\s+\d{4})?(\s+(at|เวลา)\s+\d{1,2}:\d{2})?|\S+\s+\d{1,2}(,)?(\s+\d{4})?(\s+at\s+\d{1,2}:\d{2})?|^\d+\s*(m|h|d|w|นาที|ชม\.?|วัน|สัปดาห์)\b|yesterday|เมื่อวาน)/i;
+
+      return buttons.map((button, marker) => {
         button.setAttribute(deleteAttribute, String(marker));
 
-        const lines = clean(card.innerText)
-          .split("\n")
-          .map(clean)
-          .filter(Boolean);
-        const text = clean(card.innerText);
+        // Step 1: the action row — nearest ancestor that also holds this post's Edit.
+        let row: HTMLElement | null = button.parentElement;
+        for (let depth = 0; row && depth < 12; depth += 1) {
+          if (buttonsIn(row).some(isEdit)) break;
+          row = row.parentElement;
+        }
+        // Step 2: widen while the block is still nothing but those buttons.
+        let block = row;
+        while (
+          block?.parentElement &&
+          clean(block.parentElement.innerText).length < 200 &&
+          block.parentElement !== document.body
+        ) {
+          block = block.parentElement;
+        }
+        // Step 3: the post body is what sits immediately before that block.
+        let body: Element | null = block?.previousElementSibling || null;
+        while (body && clean((body as HTMLElement).innerText).length < 20) {
+          body = body.previousElementSibling;
+        }
 
-        // The timestamp is usually a link near the top of the card.
+        const source = (body || block || button) as HTMLElement;
+        // Screenshots and "is it gone yet" checks want the post, not the tiny button.
+        source.setAttribute(markerAttribute, String(marker));
+
         let rawDate = "";
-        const timeCandidates = Array.from(
-          card.querySelectorAll<HTMLElement>('a[href*="/posts/"], a[role="link"], abbr, span'),
-        );
-        const datePattern =
-          /(\d{1,2}\s+\S+(\s+\d{4})?(\s+(at|เวลา)\s+\d{1,2}:\d{2})?|\S+\s+\d{1,2}(,)?(\s+\d{4})?(\s+at\s+\d{1,2}:\d{2})?|^\d+\s*(m|h|d|w|นาที|ชม\.?|วัน|สัปดาห์)\b|yesterday|เมื่อวาน)/i;
-        for (const candidate of timeCandidates) {
+        for (const candidate of Array.from(
+          source.querySelectorAll<HTMLElement>('a[href*="/posts/"], a[role="link"], abbr, span'),
+        )) {
           const label =
             clean(candidate.getAttribute("aria-label")) ||
             clean(candidate.getAttribute("title")) ||
@@ -331,20 +340,22 @@ export async function markPendingCards(page: Page): Promise<PendingCardSnapshot[
           }
         }
 
+        const lines = clean(source.innerText)
+          .split("\n")
+          .map(clean)
+          .filter(Boolean);
         const snippet =
           lines
             .filter(
               (line) =>
                 line.length > 12 &&
-                !/^(edit|delete|แก้ไข|ลบ|see more|ดูเพิ่มเติม)$/i.test(line),
+                !/^(edit|delete|แก้ไข|ลบ|see more|ดูเพิ่มเติม|facebook)$/i.test(line),
             )
             .slice(0, 3)
-            .join(" ") || text.slice(0, 160);
+            .join(" ") || clean(source.innerText).slice(0, 160);
 
-        results.push({ marker, snippet: snippet.slice(0, 300), rawDate });
+        return { marker, snippet: snippet.slice(0, 300), rawDate };
       });
-
-      return results;
     },
     { markerAttribute: MARKER_ATTRIBUTE, deleteAttribute: DELETE_ATTRIBUTE },
   );
@@ -422,19 +433,26 @@ export async function deletePendingCard(
   marker: number,
 ): Promise<{ removed: boolean; note: string }> {
   const button = page.locator(`[${DELETE_ATTRIBUTE}="${marker}"]`).first();
-  if (!(await button.isVisible().catch(() => false))) {
-    return { removed: false, note: "ไม่พบปุ่มลบบนการ์ดนี้แล้ว" };
+  const clickable = await button
+    .waitFor({ state: "visible", timeout: 8_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!clickable) {
+    return { removed: false, note: "ไม่พบปุ่มลบบนโพสต์นี้แล้ว" };
   }
+  await button.scrollIntoViewIfNeeded({ timeout: 8_000 }).catch(() => undefined);
   await button.click({ timeout: 15_000 });
 
   const confirmed = await confirmDeleteDialog(page);
 
-  const card = page.locator(`[${MARKER_ATTRIBUTE}="${marker}"]`).first();
-  const removed = await card
+  // The Delete button is the anchor that definitely belongs to this one post, so its
+  // disappearance is the signal that the post is gone.
+  const target = page.locator(`[${DELETE_ATTRIBUTE}="${marker}"]`).first();
+  const removed = await target
     .waitFor({ state: "detached", timeout: 20_000 })
     .then(() => true)
     // Facebook sometimes leaves the node in place and only hides it.
-    .catch(async () => !(await card.isVisible().catch(() => true)));
+    .catch(async () => !(await target.isVisible().catch(() => true)));
 
   await dismissOpenDialog(page);
   await page.waitForTimeout(500);
@@ -1026,8 +1044,12 @@ ${text.slice(0, 20_000)}
       `${fileTimestamp()}__pending-${marker}.png`,
     );
     const locator = page.locator(`[${MARKER_ATTRIBUTE}="${marker}"]`).first();
-    if (!(await locator.isVisible().catch(() => false))) return null;
-    await locator.screenshot({ path: target, timeout: 10_000 });
+    if (await locator.isVisible().catch(() => false)) {
+      await locator.screenshot({ path: target, timeout: 10_000 });
+      return target;
+    }
+    // No post body was located; the viewport still records what was on screen.
+    await page.screenshot({ path: target, fullPage: false, timeout: 10_000 });
     return target;
   }
 

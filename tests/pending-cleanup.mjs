@@ -101,21 +101,22 @@ check("null age for unparsed date", ageInDays(null, now) === null);
  * Card extraction against a mock my_pending_content page
  * ------------------------------------------------------------------ */
 
+// Mirrors the real page: probing live Facebook showed the post body and the
+// "Edit Delete" row as SIBLINGS, with the nearest shared ancestor already spanning
+// every post on screen. There is no per-post wrapper to climb to.
 function card(index, dateLabel, text) {
   return `
-    <div class="feed-item">
-      <div class="wrapper">
-        <div class="story">
-          <div class="header">
-            <span class="author">Lomnuer Code</span>
-            <a role="link" href="/groups/123/posts/${index}/">${dateLabel}</a>
-          </div>
-          <div class="body"><p>${text}</p></div>
-          <div class="actions">
-            <div role="button" tabindex="0">Edit</div>
-            <div role="button" tabindex="0">Delete</div>
-          </div>
-        </div>
+    <div class="story-body">
+      <div class="header">
+        <span class="author">Lomnuer Code</span>
+        <a role="link" href="/groups/123/posts/${index}/">${dateLabel}</a>
+      </div>
+      <div class="message"><p>${text}</p></div>
+    </div>
+    <div class="actions-outer">
+      <div class="actions">
+        <div role="button" aria-label="Edit"><div><span>Edit</span></div></div>
+        <div role="button" aria-label="Delete"><div><span>Delete</span></div></div>
       </div>
     </div>`;
 }
@@ -149,7 +150,8 @@ const server = http.createServer((_request, response) => {
           document.querySelector("#feed").addEventListener("click", (event) => {
             const button = event.target.closest('[role="button"]');
             if (!button || button.textContent.trim() !== "Delete") return;
-            const item = button.closest(".feed-item");
+            const item = button.closest(".actions-outer");
+            const body = item.previousElementSibling;
             window.setTimeout(() => {
               const dialog = document.createElement("div");
               dialog.setAttribute("role", "dialog");
@@ -162,6 +164,7 @@ const server = http.createServer((_request, response) => {
               confirm.setAttribute("role", "button");
               confirm.innerHTML = "<span>Delete</span>";
               confirm.addEventListener("click", () => {
+                if (body) body.remove();
                 item.remove();
                 dialog.remove();
               });
@@ -227,7 +230,7 @@ try {
   check("confirms the delayed Delete post? modal", first.removed, first.note);
   check(
     "removes exactly one card",
-    (await page.locator(".feed-item").count()) === 3,
+    (await page.locator(".actions-outer").count()) === 3,
   );
   check("leaves no modal open", (await page.locator('[role="dialog"]').count()) === 0);
 
