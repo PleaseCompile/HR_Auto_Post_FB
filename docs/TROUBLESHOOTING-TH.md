@@ -332,3 +332,17 @@ Error:
 ห้ามแนบ Cookie, Browser Profile, Password หรือฐานข้อมูลจริงใน Issue สาธารณะ
 
 [ถัดไป: Operations checklist](OPERATIONS-TH.md)
+
+## เปิด Browser ไม่ขึ้น: `Invalid file descriptor to ICU data received`
+
+อาการ: กด "เชื่อมต่อ Facebook" แล้วขึ้น `browserType.launchPersistentContext: Target page, context or browser has been closed` และใน log มี `Invalid file descriptor to ICU data received` กับ `exitCode=2147483651`
+
+สาเหตุ: ไฟล์ข้อมูลของ Chromium (`icudtl.dat`, `*.pak`, `v8_context_snapshot.bin`) หายไป เหลือแต่ `.exe` กับ `.dll` มักเกิดหลัง `npm install` อัปเกรด Playwright โดยไม่ได้ลง Chromium ใหม่ให้ตรงเวอร์ชัน
+
+วิธีแก้:
+
+```powershell
+npm run install-browser
+```
+
+ตรวจว่าครบแล้ว: `%LOCALAPPDATA%\ms-playwright\chromium-*\chrome-win64\` ควรมีไฟล์ราว 30 ไฟล์ ไม่ใช่ 11 ไฟล์

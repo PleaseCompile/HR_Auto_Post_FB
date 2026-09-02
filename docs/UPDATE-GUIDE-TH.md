@@ -29,6 +29,10 @@ npm install
 ```
 
 ```powershell
+npm run install-browser
+```
+
+```powershell
 npm run build
 ```
 
@@ -36,10 +40,12 @@ npm run build
 powershell -ExecutionPolicy Bypass -File .\scripts\start-windows.ps1
 ```
 
+> **อย่าข้ามขั้น `npm run install-browser`** — `package.json` ระบุ Playwright เป็น `^1.54.2` ดังนั้น `npm install` อาจอัปเกรด Playwright ให้เอง และ Playwright ผูกกับ Chromium เวอร์ชันเฉพาะแบบตายตัว ถ้าไม่ลง Chromium ใหม่ให้ตรงกัน เบราว์เซอร์จะเปิดไม่ขึ้น
+
 ### Linux Desktop (Terminal)
 
 ```bash
-git pull origin main && npm install && npm run build && ./scripts/start-linux.sh
+git pull origin main && npm install && npm run install-browser && npm run build && ./scripts/start-linux.sh
 ```
 
 > **ติดตั้งด้วย Setup.exe อยู่?** ไม่ต้องใช้คำสั่งข้างบน — ดาวน์โหลด Setup.exe ตัวใหม่แล้วติดตั้งทับได้เลย ข้อมูลใน `data/` ไม่ถูกลบ ดู [INSTALL-SETUP-EXE-TH.md](INSTALL-SETUP-EXE-TH.md)
@@ -179,6 +185,16 @@ git pull origin main && npm install && npm run build && ./scripts/start-linux.sh
 ---
 
 ## การแก้ปัญหาและย้อนกลับ
+
+### เปิด Browser ไม่ขึ้น / `launchPersistentContext: Target page, context or browser has been closed`
+
+ถ้าใน log มีบรรทัด `Invalid file descriptor to ICU data received` หรือ `exitCode=2147483651` แปลว่า **ไฟล์ Chromium ไม่ครบ** — มักเกิดหลัง `npm install` อัปเกรด Playwright ข้ามเวอร์ชันโดยไม่ได้ลง Chromium ใหม่
+
+```powershell
+npm run install-browser
+```
+
+ตรวจว่าซ่อมสำเร็จ: โฟลเดอร์ `%LOCALAPPDATA%\ms-playwright\chromium-*\chrome-win64\` ต้องมี `icudtl.dat`, `resources.pak` และ `v8_context_snapshot.bin` (ถ้าเหลือแต่ไฟล์ `.dll` กับ `.exe` ราว 11 ไฟล์ คือยังไม่ครบ)
 
 ### อัปเดตแล้วเปิดไม่ได้
 
