@@ -34,6 +34,8 @@
 - ปิด Session จาก Facebook ถ้าเครื่องสูญหาย
 - Login ใหม่เมื่อสงสัยว่า Profile ถูกคัดลอก
 
+ไฟล์ไหนในโปรไฟล์เก็บอะไร, คุกกี้ถูกเข้ารหัสด้วย Windows DPAPI อย่างไร และทำไมก๊อปไปเครื่องอื่นแล้วใช้ไม่ได้ อธิบายไว้ใน [FACEBOOK-SESSION-EXPLAINED-TH.md](FACEBOOK-SESSION-EXPLAINED-TH.md)
+
 ## Git safety
 
 ก่อน commit ทุกครั้ง:

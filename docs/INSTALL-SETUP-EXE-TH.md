@@ -53,6 +53,8 @@
 
 ไฟล์ติดตั้งนี้**ไม่มี**บัญชี Facebook หรือ Session ของคนอื่นติดมาด้วย
 
+อยากรู้ว่าโปรแกรมจำ Session ไว้ที่ไหนและทำงานยังไง อ่าน [FACEBOOK-SESSION-EXPLAINED-TH.md](FACEBOOK-SESSION-EXPLAINED-TH.md)
+
 ## ข้อมูลของคุณเก็บที่ไหน
 
 ```text

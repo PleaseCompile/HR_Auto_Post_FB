@@ -8,17 +8,20 @@
 
 ### ผู้ใช้งานครั้งแรก
 
-1. เลือก [ติดตั้งบน Windows](INSTALL-WINDOWS-TH.md) หรือ [ติดตั้งบน Linux](INSTALL-LINUX-TH.md)
-2. อ่าน [คู่มือใช้งาน](USER-GUIDE-TH.md)
-3. อ่าน [รายการตรวจประจำวัน](OPERATIONS-TH.md)
-4. ถ้าติดขัด เปิด [คู่มือแก้ปัญหา](TROUBLESHOOTING-TH.md)
+1. อ่าน [คำเตือนก่อนนำไปใช้บนเครื่องอื่น](../README.md#คำเตือนก่อนนำไปใช้บนเครื่องอื่น)
+2. เลือก [ติดตั้งจาก Setup.exe](INSTALL-SETUP-EXE-TH.md), [ติดตั้งบน Windows](INSTALL-WINDOWS-TH.md) หรือ [ติดตั้งบน Linux](INSTALL-LINUX-TH.md)
+3. อ่าน [คู่มือใช้งาน](USER-GUIDE-TH.md)
+4. อ่าน [Facebook Session ถูกจำไว้ที่ไหน](FACEBOOK-SESSION-EXPLAINED-TH.md)
+5. อ่าน [รายการตรวจประจำวัน](OPERATIONS-TH.md)
+6. ถ้าติดขัด เปิด [คู่มือแก้ปัญหา](TROUBLESHOOTING-TH.md)
 
 ### ผู้ดูแลเครื่องและข้อมูล
 
 1. [การตั้งค่า](CONFIGURATION-TH.md)
-2. [สำรอง กู้คืน และย้ายเครื่อง](BACKUP-RESTORE-TH.md)
-3. [ความปลอดภัย](SECURITY-TH.md)
-4. [สถาปัตยกรรมปัจจุบัน](ARCHITECTURE-TH.md)
+2. [Facebook Session ถูกจำไว้ที่ไหน และทำงานยังไง](FACEBOOK-SESSION-EXPLAINED-TH.md)
+3. [สำรอง กู้คืน และย้ายเครื่อง](BACKUP-RESTORE-TH.md)
+4. [ความปลอดภัย](SECURITY-TH.md)
+5. [สถาปัตยกรรมปัจจุบัน](ARCHITECTURE-TH.md)
 
 ### นักพัฒนา
 
@@ -37,6 +40,10 @@
 | ไฟล์ | เนื้อหา | สถานะ |
 |---|---|---|
 | [UPDATE-GUIDE-TH.md](UPDATE-GUIDE-TH.md) | ขั้นตอนอัปเดตระบบ เช็กลิสต์ และสิ่งที่เปลี่ยน | ใช้ได้ปัจจุบัน |
+| [FACEBOOK-SESSION-EXPLAINED-TH.md](FACEBOOK-SESSION-EXPLAINED-TH.md) | Session Facebook เก็บที่ไหน ไฟล์ไหน ทำไมไม่ต้องล็อกอินซ้ำ และทำไมย้ายเครื่องแล้วต้องล็อกอินใหม่ | ใช้ได้ปัจจุบัน |
+| [INSTALL-SETUP-EXE-TH.md](INSTALL-SETUP-EXE-TH.md) | ติดตั้งจากไฟล์ Setup.exe สำหรับผู้ใช้ทั่วไป | ใช้ได้ปัจจุบัน |
+| [BUILD-INSTALLER-TH.md](BUILD-INSTALLER-TH.md) | สร้างไฟล์ Setup.exe เพื่อแจกจ่าย | ใช้ได้ปัจจุบัน |
+| [PENDING-CLEANUP-TH.md](PENDING-CLEANUP-TH.md) | ล้างโพสต์ที่ค้างรออนุมัติ | ใช้ได้ปัจจุบัน |
 | [INSTALL-WINDOWS-TH.md](INSTALL-WINDOWS-TH.md) | ติดตั้ง เปิด อัปเดต และถอนบน Windows | ใช้ได้ปัจจุบัน |
 | [INSTALL-LINUX-TH.md](INSTALL-LINUX-TH.md) | ติดตั้ง dependencies และเปิดบน Linux Desktop | ใช้ได้ปัจจุบัน |
 | [USER-GUIDE-TH.md](USER-GUIDE-TH.md) | Workflow, สถานะ, หลักฐาน และตัวกรอง | ใช้ได้ปัจจุบัน |
