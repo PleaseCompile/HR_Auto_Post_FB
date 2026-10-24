@@ -45,6 +45,7 @@ import {
 } from "./config.js";
 import { browserSession } from "./session.js";
 import { systemStatus } from "./system-status.js";
+import { authEnabled, readAudit, registerAuth } from "./auth.js";
 import { runManager } from "./run-manager.js";
 import type { GroupRecord } from "./types.js";
 import { groupScanner } from "./group-scanner.js";
@@ -80,6 +81,9 @@ const evidenceUpload = multer({
 // which matters on a phone over mobile data or a relayed Tailscale path.
 app.use(compression());
 app.use(express.json({ limit: "2mb" }));
+// Shared-password login (enabled when HR_AUTO_PASSWORD_HASH is set). Must run
+// before every page, API route and static file below.
+registerAuth(app, publicDirectory);
 
 // API reads revalidate with the ETag Express already sends, so an unchanged
 // list comes back as a tiny 304 instead of the full body on every poll.
@@ -240,7 +244,12 @@ app.get("/api/health", (_request, response) => {
 });
 
 app.get("/api/system", (_request, response) => {
-  response.json(systemStatus());
+  response.json({ ...systemStatus(), authEnabled });
+});
+
+app.get("/api/audit", (request, response) => {
+  const limit = Math.min(200, Math.max(1, Number(request.query.limit) || 50));
+  response.json(readAudit(limit));
 });
 
 app.get("/api/dashboard", asyncRoute(async (_request, response) => {

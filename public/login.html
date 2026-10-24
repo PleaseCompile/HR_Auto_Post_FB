@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>เข้าสู่ระบบ — HR Auto</title>
+    <style>
+      :root {
+        --ink: #101828;
+        --muted: #667085;
+        --line: #d0d5dd;
+        --blue: #155eef;
+        --blue-dark: #004eeb;
+        --red: #b42318;
+        --red-soft: #fef3f2;
+        font-family: "Leelawadee UI", "Noto Sans Thai", "Tahoma", system-ui, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        padding: 20px 16px;
+        color: var(--ink);
+        background: linear-gradient(160deg, #142033 0%, #1d3a6e 100%);
+      }
+      .card {
+        width: min(400px, 100%);
+        padding: 28px 24px;
+        border-radius: 18px;
+        background: #ffffff;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 22px;
+      }
+      .brand-mark {
+        width: 44px;
+        height: 44px;
+        display: grid;
+        place-items: center;
+        border-radius: 12px;
+        color: #ffffff;
+        background: #142033;
+        font: 800 22px/1 system-ui, sans-serif;
+      }
+      .brand strong { display: block; font-size: 19px; }
+      .brand span { display: block; color: var(--muted); font-size: 13px; }
+      h1 { margin: 0 0 6px; font-size: 22px; }
+      p.lead { margin: 0 0 20px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+      label { display: grid; gap: 6px; margin-bottom: 14px; font-size: 14px; font-weight: 700; }
+      label small { color: var(--muted); font-weight: 400; }
+      .input-wrap { position: relative; }
+      input {
+        width: 100%;
+        min-height: 48px;
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        font: inherit;
+        font-size: 16px; /* stops iOS zooming into the field */
+      }
+      input:focus { outline: 3px solid rgba(21, 94, 239, 0.25); border-color: var(--blue); }
+      .toggle {
+        position: absolute;
+        top: 50%;
+        right: 8px;
+        transform: translateY(-50%);
+        min-height: 34px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: 8px;
+        color: var(--blue);
+        background: transparent;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      #password { padding-right: 70px; }
+      button[type="submit"] {
+        width: 100%;
+        min-height: 50px;
+        margin-top: 4px;
+        border: 0;
+        border-radius: 10px;
+        color: #ffffff;
+        background: var(--blue);
+        font: inherit;
+        font-size: 16px;
+        font-weight: 800;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+      }
+      button[type="submit"]:hover { background: var(--blue-dark); }
+      button[type="submit"]:disabled { opacity: 0.75; cursor: progress; }
+      .spinner {
+        width: 16px;
+        height: 16px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .error {
+        margin: 0 0 14px;
+        padding: 11px 13px;
+        border: 1px solid #fecdca;
+        border-left: 5px solid #d92d20;
+        border-radius: 10px;
+        color: var(--red);
+        background: var(--red-soft);
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .foot { margin: 18px 0 0; color: var(--muted); font-size: 12.5px; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">H</div>
+        <div><strong>HR Auto</strong><span>ศูนย์ควบคุมโพสต์งานของทีม</span></div>
+      </div>
+      <h1>เข้าสู่ระบบ</h1>
+      <p class="lead">ใช้รหัสผ่านของทีม เข้าครั้งเดียวแล้วเครื่องนี้จะจำไว้ 30 วัน</p>
+      <form id="loginForm" novalidate>
+        <p class="error" id="error" role="alert" hidden></p>
+        <label>
+          <span>ชื่อของคุณ <small>(ไว้บันทึกว่าใครทำอะไร)</small></span>
+          <input id="name" name="name" autocomplete="nickname" maxlength="40" placeholder="เช่น ต้น, มายด์" />
+        </label>
+        <label>
+          <span>รหัสผ่านทีม</span>
+          <span class="input-wrap">
+            <input id="password" name="password" type="password" autocomplete="current-password" required />
+            <button type="button" class="toggle" id="toggle" aria-label="แสดงรหัสผ่าน">แสดง</button>
+          </span>
+        </label>
+        <button type="submit" id="submit">เข้าสู่ระบบ</button>
+      </form>
+      <p class="foot">ห้ามแชร์รหัสผ่านนอกทีม · ใช้ได้เฉพาะคนที่ได้รับอนุญาต</p>
+    </main>
+    <script>
+      const form = document.querySelector("#loginForm");
+      const nameInput = document.querySelector("#name");
+      const passwordInput = document.querySelector("#password");
+      const errorBox = document.querySelector("#error");
+      const submit = document.querySelector("#submit");
+      const toggle = document.querySelector("#toggle");
+
+      const storage = {
+        get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+        set(key, value) { try { localStorage.setItem(key, value); } catch { /* private mode */ } },
+      };
+      nameInput.value = storage.get("hrAutoName") || "";
+      (nameInput.value ? passwordInput : nameInput).focus();
+
+      // Already signed in (e.g. pressed back): go straight to the app.
+      fetch("/api/auth/me").then((r) => r.json()).then((me) => {
+        if (me.signedIn) location.replace("/");
+      }).catch(() => {});
+
+      toggle.addEventListener("click", () => {
+        const show = passwordInput.type === "password";
+        passwordInput.type = show ? "text" : "password";
+        toggle.textContent = show ? "ซ่อน" : "แสดง";
+        toggle.setAttribute("aria-label", show ? "ซ่อนรหัสผ่าน" : "แสดงรหัสผ่าน");
+      });
+
+      function showError(message) {
+        errorBox.textContent = message;
+        errorBox.hidden = false;
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        errorBox.hidden = true;
+        if (!passwordInput.value) {
+          showError("กรุณาใส่รหัสผ่าน");
+          passwordInput.focus();
+          return;
+        }
+        submit.disabled = true;
+        submit.innerHTML = '<span class="spinner" aria-hidden="true"></span>กำลังตรวจสอบ…';
+        try {
+          const response = await fetch("/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: nameInput.value.trim(), password: passwordInput.value }),
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || "เข้าสู่ระบบไม่สำเร็จ");
+          storage.set("hrAutoName", nameInput.value.trim());
+          location.replace("/");
+        } catch (error) {
+          showError(error instanceof TypeError ? "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจอินเทอร์เน็ตแล้วลองใหม่" : error.message);
+          passwordInput.select();
+        } finally {
+          submit.disabled = false;
+          submit.textContent = "เข้าสู่ระบบ";
+        }
+      });
+    </script>
+  </body>
+</html>

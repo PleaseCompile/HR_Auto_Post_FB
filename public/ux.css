@@ -454,6 +454,54 @@ input.toggle:focus-visible {
   display: none;
 }
 
+/* ---- Team account card (settings) ---- */
+.team-activity-heading {
+  margin: 18px 0 8px;
+  color: var(--ink-700);
+  font-size: 14px;
+}
+
+.team-activity-list {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  list-style: none;
+}
+
+.team-activity-item {
+  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: minmax(70px, auto) minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 10px;
+  border-left: 4px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--canvas);
+  font-size: 13px;
+}
+
+.team-activity-item.tone-done { border-left-color: var(--green); }
+.team-activity-item.tone-info { border-left-color: var(--blue); }
+.team-activity-item.tone-danger { border-left-color: var(--red); background: var(--red-soft); }
+
+.team-activity-who {
+  color: var(--ink-900);
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.team-activity-what {
+  color: var(--ink-700);
+  overflow-wrap: anywhere;
+}
+
+.team-activity-item time {
+  color: var(--ink-500);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* ---- Runs page ---- */
 .help-details {
   margin-bottom: 12px;

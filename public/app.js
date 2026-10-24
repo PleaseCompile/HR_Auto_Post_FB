@@ -337,6 +337,10 @@ async function api(url, options = {}) {
     });
     const contentType = response.headers.get("content-type") || "";
     const body = contentType.includes("application/json") ? await response.json() : null;
+    if (response.status === 401 && body?.code === "AUTH_REQUIRED") {
+      goToLogin();
+      throw new Error("กรุณาเข้าสู่ระบบอีกครั้ง");
+    }
     if (!response.ok) throw new Error(body?.error || `Request failed (${response.status})`);
     return body;
   } catch (error) {
@@ -347,6 +351,14 @@ async function api(url, options = {}) {
   } finally {
     if (!quiet) trackRequest(-1);
   }
+}
+
+let redirectingToLogin = false;
+
+function goToLogin() {
+  if (redirectingToLogin) return;
+  redirectingToLogin = true;
+  window.location.href = "/login";
 }
 
 /* ---------- In-app dialogs ----------
@@ -490,6 +502,10 @@ async function refreshAll({ quiet = false, light = false } = {}) {
       request("/api/pending-cleanup"),
       request("/api/system").catch(() => null),
     ]);
+  if (state.route === "settings") {
+    state.audit = await request("/api/audit?limit=25").catch(() => state.audit || []);
+    state.me = await request("/api/auth/me").catch(() => state.me || null);
+  }
   state.system = system;
   state.dashboard = dashboard;
   state.drafts = drafts;
@@ -554,6 +570,10 @@ function navigate(route) {
   closeMoreSheet();
   render();
   window.scrollTo({ top: 0 });
+  // Team activity and the signed-in name are only fetched for this page.
+  if (route === "settings") {
+    void refreshAll({ quiet: true }).then(() => state.route === "settings" && render()).catch(() => {});
+  }
 }
 
 const moreSheet = document.querySelector("#moreSheet");
@@ -2390,6 +2410,73 @@ function renderServerCard() {
   `;
 }
 
+const auditPathLabels = [
+  [/^POST \/api\/runs$/, "สร้างคิวโพสต์"],
+  [/^POST \/api\/runs\/restart-draft$/, "ล้างคิวเดิมและสร้างใหม่"],
+  [/^POST \/api\/runs\/[^/]+\/start$/, "เริ่มคิว"],
+  [/^POST \/api\/runs\/[^/]+\/pause$/, "พักคิว"],
+  [/^POST \/api\/runs\/[^/]+\/resume$/, "ทำคิวต่อ"],
+  [/^POST \/api\/runs\/[^/]+\/stop$/, "หยุดคิว"],
+  [/^POST \/api\/runs\/[^/]+\/workflow$/, "เปลี่ยนรูปแบบคิว"],
+  [/^DELETE \/api\/runs\/[^/]+$/, "ลบทั้งคิว"],
+  [/^POST \/api\/runs\/[^/]+\/targets\/mark-posted-bulk$/, "บันทึกโพสต์เองแล้วหลายกลุ่ม"],
+  [/^POST \/api\/runs\/[^/]+\/targets\/[^/]+\/action$/, "ยืนยัน/ข้าม/โพสต์เองในกลุ่ม"],
+  [/^POST \/api\/runs\/[^/]+\/targets\/[^/]+\/requeue$/, "ย้ายกลุ่มไปท้ายคิว"],
+  [/^POST \/api\/runs\/[^/]+\/targets\/[^/]+\/reconcile-posted$/, "ยืนยันว่าโพสต์เองแล้ว"],
+  [/^POST \/api\/runs\/[^/]+\/targets\/[^/]+\/focus$/, "เปิดแท็บของกลุ่ม"],
+  [/^POST \/api\/drafts$/, "สร้าง Draft"],
+  [/^PUT \/api\/drafts\/[^/]+$/, "แก้ไข Draft"],
+  [/^POST \/api\/drafts\/[^/]+\/media$/, "อัปโหลดรูป"],
+  [/^DELETE \/api\/media\/[^/]+$/, "ลบรูป"],
+  [/^POST \/api\/groups$/, "เพิ่มกลุ่ม"],
+  [/^POST \/api\/groups\/import$/, "นำเข้ากลุ่มจาก CSV"],
+  [/^POST \/api\/groups\/scan\/start$/, "เริ่มสแกนกลุ่ม"],
+  [/^POST \/api\/groups\/scan\/stop$/, "หยุดสแกนกลุ่ม"],
+  [/^POST \/api\/pending-cleanup\/scan\/start$/, "เริ่มตรวจโพสต์ค้าง"],
+  [/^POST \/api\/pending-cleanup\/delete\/start$/, "เริ่มลบโพสต์ค้าง"],
+  [/^POST \/api\/session\/connect$/, "เชื่อมต่อ Facebook"],
+  [/^POST \/api\/session\/close$/, "ปิด Browser"],
+  [/manual-evidence/, "จัดการหลักฐาน"],
+];
+
+function describeAudit(entry) {
+  if (entry.event === "login") return { tone: "info", text: "เข้าสู่ระบบ" };
+  if (entry.event === "logout") return { tone: "info", text: "ออกจากระบบ" };
+  if (entry.event === "login_failed") return { tone: "danger", text: "ใส่รหัสผิด" };
+  if (entry.event === "login_locked") return { tone: "danger", text: "ถูกล็อกเพราะใส่รหัสผิดหลายครั้ง" };
+  const key = `${entry.method} ${entry.path}`;
+  const label = auditPathLabels.find(([pattern]) => pattern.test(key))?.[1] || key;
+  const failed = Number(entry.status) >= 400;
+  return { tone: failed ? "danger" : "done", text: failed ? `${label} (ไม่สำเร็จ)` : label };
+}
+
+function renderTeamCard() {
+  const me = state.me;
+  if (!me?.enabled) return "";
+  const entries = (state.audit || []).filter((entry) => entry.event !== "action" || entry.method !== "GET");
+  return `
+    <section class="panel settings-card team-card">
+      <h3>บัญชีทีม</h3>
+      <div class="session-detail">
+        <div><span>เข้าใช้งานในชื่อ</span><strong>${escapeHtml(me.name || "ไม่ระบุชื่อ")}</strong></div>
+      </div>
+      <div class="toolbar-start"><button class="button button-ghost" data-action="logout">ออกจากระบบเครื่องนี้</button></div>
+      <h4 class="team-activity-heading">กิจกรรมล่าสุดของทีม</h4>
+      ${
+        entries.length
+          ? `<ul class="team-activity-list">${entries
+              .slice(0, 20)
+              .map((entry) => {
+                const { tone, text } = describeAudit(entry);
+                return `<li class="team-activity-item tone-${tone}"><span class="team-activity-who">${escapeHtml(entry.user || entry.name || "—")}</span><span class="team-activity-what">${escapeHtml(text)}</span><time>${formatTime(entry.time)}</time></li>`;
+              })
+              .join("")}</ul>`
+          : '<p class="muted">ยังไม่มีกิจกรรม</p>'
+      }
+    </section>
+  `;
+}
+
 function renderSettings() {
   const session = state.dashboard?.session || {};
   return `
@@ -2397,6 +2484,7 @@ function renderSettings() {
       <div><h2>Session และความปลอดภัย</h2><p class="muted">Browser profile ถูกเก็บไว้ในเครื่องและไม่แสดง token บนหน้าจอ</p></div>
     </div>
     <div class="settings-grid">
+      ${renderTeamCard()}
       <section class="panel settings-card">
         <h3>Facebook Browser Session</h3>
         <p>เปิด Chromium เฉพาะของ HR Auto แล้วล็อกอินและทำ 2FA ด้วยตนเอง หน้าต่างนี้จะถูกใช้เตรียมโพสต์ระหว่างทำงาน</p>
@@ -2551,7 +2639,10 @@ function uploadWithProgress(url, formData, onProgress) {
     });
     xhr.addEventListener("load", () => {
       if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.response);
-      else reject(new Error(xhr.response?.error || `อัปโหลดไม่สำเร็จ (${xhr.status})`));
+      else if (xhr.status === 401) {
+        goToLogin();
+        reject(new Error("กรุณาเข้าสู่ระบบอีกครั้ง"));
+      } else reject(new Error(xhr.response?.error || `อัปโหลดไม่สำเร็จ (${xhr.status})`));
     });
     xhr.addEventListener("error", () =>
       reject(new Error("อัปโหลดรูปไม่สำเร็จ ตรวจอินเทอร์เน็ตหรือ Tailscale แล้วลองใหม่")),
@@ -3403,6 +3494,14 @@ async function handleAction(button, options = {}) {
       await refreshAll();
       render();
       toast("อัปเดตสถานะแล้ว", "info");
+    } else if (action === "logout") {
+      const accepted = await uiConfirm("เครื่องนี้จะต้องใส่รหัสผ่านทีมใหม่ในครั้งถัดไป", {
+        title: "ออกจากระบบเครื่องนี้?",
+        confirmText: "ออกจากระบบ",
+      });
+      if (!accepted) return;
+      await api("/api/auth/logout", { method: "POST" });
+      window.location.href = "/login";
     } else if (action === "close-session") {
       await api("/api/session/close", { method: "POST" });
       await refreshAll();
