@@ -210,26 +210,79 @@ sudo bash deploy/ubuntu/tailscale-setup.sh
 
 ---
 
-## 7. ขึ้น VPS จริง
+## 7. ขึ้นเซิร์ฟเวอร์จริง (Ubuntu 26, 1 core / 2 GB, โดเมน wanlaza.com)
 
-ขั้นตอนเหมือนข้อ 6.2–6.5 ทุกอย่าง แค่ทำบน VPS (เลือก Ubuntu 24.04 หรือ 22.04)
+เป้าหมาย: ทีม 4 คนเปิด `https://hr.wanlaza.com` จากมือถือที่ไหนก็ได้ ใช้**รหัสผ่านทีมเดียวกัน** สิทธิ์เท่ากันทุกคน และทุกคนควบคุมหน้าจอ Browser ได้
 
-ข้อแนะนำแพ็กเกจ (เมื่อโพสต์รอบละ ~50 กลุ่ม):
+### 7.1 ภาพรวม
 
-| แพ็กเกจ | เหมาะไหม |
+```text
+มือถือทีม ── https://hr.wanlaza.com ──► VPS (IP เปิดเผย, firewall เปิดแค่ 22/80/443)
+                                         Nginx (HTTPS จาก Let's Encrypt, จำกัดการลองรหัส)
+                                           ├─ ทุกหน้า → HR Auto (127.0.0.1:4173) ต้องล็อกอินรหัสทีม
+                                           └─ /vnc/  → noVNC (127.0.0.1:6080) Nginx ถาม HR Auto ก่อนว่าล็อกอินแล้วไหม
+```
+
+### 7.2 สิ่งที่ปรับให้เหมาะกับ 1 core / 2 GB
+
+| เรื่อง | ทำอะไร | ทำไม |
+|---|---|---|
+| จำนวนแท็บ | แนะนำ 2 แท็บ, ปิดโหมดหลายหน้าต่าง | วัดจริงใน VM: ระบบ + Chromium 1 แท็บ ≈ 1.2 GB เหลือที่ให้อีกแท็บเดียว |
+| Chromium | ปิด GPU, ปิดวิดีโอเล่นเอง, ปิด extension/ตัวอัปเดต, จำกัด process | ลด CPU/RAM ที่ Feed ของ Facebook กิน |
+| จอเสมือน | 1280x800 | framebuffer และภาพที่ส่งให้คนดูเล็กลง |
+| VNC | x11vnc ตรวจจอทุก 50 ms (เดิม 20 ms) | คนดูพร้อมกัน 4 คนไม่แย่ง CPU กับ Facebook มากเกินไป |
+| RAM เต็ม | zram (swap บีบอัดในแรม) + swap ดิสก์ 1 GB, ตัวโปรแกรมตั้ง OOM -500 และดัน Chromium เป็น +600 | ถ้าแรมหมด เคอร์เนลจะฆ่าแท็บ ไม่ใช่ตัวโปรแกรม |
+| Chromium ล่ม | แท็บที่ยังไม่ได้กด Post ย้ายไปลองใหม่ท้ายคิว แล้วเปิด Browser ใหม่เอง | คิวไปต่อได้โดยไม่ต้องมีคนเฝ้า |
+| ดิสก์ 20 GB | ลบภาพหลักฐานของระบบที่เก่ากว่า 60 วัน และลบเก่าสุดก่อนถ้าพื้นที่เหลือ < 2 GB (ไม่แตะไฟล์ที่ทีมอัปโหลดเอง) | ภาพหลักฐานสะสมวันละหลายสิบ MB |
+| log | journald สูงสุด 200 MB, browser-events และ audit หมุนไฟล์ที่ 5 MB | log ไม่กินดิสก์ |
+| สำรองข้อมูล | ทุกคืน 03:30 เก็บฐานข้อมูล รูป Draft และบันทึกกิจกรรม 14 วัน ที่ `/var/backups/hr-auto` | กู้คืนได้ถ้าเครื่องพัง (ไม่สำรอง Session Facebook โดยตั้งใจ) |
+
+### 7.3 ความปลอดภัย
+
+| ชั้น | รายละเอียด |
 |---|---|
-| SSD1 · 2 GB / 1 vCore | ไม่แนะนำ ได้แค่ 1–2 แท็บ ต้องพึ่ง swap ช้าและเสี่ยงแท็บ crash |
-| **SSD2 · 4 GB / 2 vCore** | **แนะนำ** ตั้งคิว 3–4 แท็บ (ตรงกับ VM ที่ทดสอบ) |
-| SSD3 · 8 GB / 4 vCore | เกินจำเป็น เว้นแต่อยากเปิด 8–10 แท็บพร้อมกัน |
+| ล็อกอินทีม | รหัสเดียว ≥ 10 ตัว เก็บแค่ค่า scrypt hash, จำเครื่องไว้ 30 วัน, เปลี่ยนรหัส = ทุกเครื่องถูกออกจากระบบ |
+| กันเดารหัส | ผิด 5 ครั้งใน 15 นาที → ล็อกเฉพาะ IP นั้น, Nginx จำกัด 10 ครั้ง/นาที/IP |
+| กันเว็บอื่นสั่งงาน | cookie `SameSite=Strict` + ตรวจ Origin ทุกคำสั่งที่เปลี่ยนข้อมูล |
+| หน้าจอ Browser | เข้า `/vnc/` ได้เฉพาะคนที่ล็อกอินแล้ว (Nginx `auth_request`) ไม่มีรหัส VNC แยก |
+| บันทึกกิจกรรม | ใครทำอะไร จาก IP ไหน ดูได้ในหน้าตั้งค่า (ใส่ชื่อตอนล็อกอิน) |
+| เครือข่าย | ตัวแอปและ VNC ฟังแค่ 127.0.0.1, firewall เปิดแค่ SSH (จำกัดอัตรา), 80, 443 |
+| HTTPS | Let's Encrypt ต่ออายุอัตโนมัติ, HSTS |
 
-ข้อควรรู้บน VPS:
+**แนะนำมาก:** ใช้ SSH key แทนรหัสผ่าน SSH (IP ของ VPS เปิดเผย มีบอตเดารหัส SSH ตลอดเวลา) ตั้ง key ให้เข้าได้ก่อน แล้วค่อยปิดรหัสผ่านใน `/etc/ssh/sshd_config` (`PasswordAuthentication no`) ตัวติดตั้ง**ไม่**ปิดให้เอง เพราะถ้ายังไม่มี key จะเข้าเครื่องไม่ได้อีกเลย
 
-- **ล็อกอินจาก IP ของ Data Center** Facebook มักขอยืนยันตัวตนครั้งแรก ทำผ่าน noVNC ด้วยตัวเอง และอย่าใช้หลายบัญชีบนเครื่องเดียว
-- **Firewall:** แนะนำเปิดแค่ SSH ไม่ต้องเปิดพอร์ต 4173/6080 (Tailscale ไม่ต้องเปิดพอร์ตขาเข้า)
-  ```bash
-  sudo ufw allow OpenSSH && sudo ufw enable
-  ```
+### 7.4 ขั้นตอน
+
+1. **เช่า VPS** Ubuntu 26.04 แล้วจด IP
+2. **ตั้ง DNS ใน Cloudflare** → wanlaza.com → DNS → Records → Add record
+
+   | Type | Name | IPv4 address | Proxy status |
+   |---|---|---|---|
+   | `A` | `hr` | IP ของ VPS | **DNS only (เมฆสีเทา)** |
+
+3. **SSH เข้า VPS แล้วติดตั้ง**
+   ```bash
+   sudo apt update && sudo apt install -y git
+   git clone -b server-edition https://github.com/PleaseCompile/HR_Auto_Post_FB.git
+   cd HR_Auto_Post_FB && sudo bash deploy/ubuntu/install.sh
+   ```
+   ตัวติดตั้งจะถาม:
+   - Access mode → `1` (public)
+   - Domain → `hr.wanlaza.com`
+   - Email → สำหรับแจ้งเตือนใบรับรองใกล้หมดอายุ
+   - ยอมรับเงื่อนไข Let's Encrypt → `yes`
+   - **รหัสผ่านทีม** (พิมพ์ 2 ครั้ง ไม่แสดงบนจอ)
+4. **เปิด `https://hr.wanlaza.com`** ล็อกอิน → ตั้งค่าและ Session → เชื่อมต่อ Facebook → ปุ่ม "ดูหน้าจอ Browser" → ล็อกอิน Facebook + 2FA
+5. **ตรวจทั้งระบบ:** `sudo bash deploy/ubuntu/doctor.sh`
+
+ทดสอบก่อนใน VM ได้ด้วยโหมด `2` (lan): http ธรรมดาที่พอร์ต 80 ใช้ระบบล็อกอินกับ Nginx แบบเดียวกัน ยกเว้น HTTPS (ใช้ทดสอบเท่านั้น ห้ามเปิดออกอินเทอร์เน็ต)
+
+### 7.5 ข้อควรรู้
+
+- **ล็อกอิน Facebook จาก IP ของ Data Center** Facebook มักขอยืนยันตัวตนครั้งแรก ทำผ่านหน้าจอ Browser ด้วยตัวเอง และอย่าใช้หลายบัญชีบนเครื่องเดียว
+- **ทุกคนคุมเมาส์ได้พร้อมกัน** ตกลงกันในทีมว่าใครกำลังใช้หน้าจอ Browser อยู่ ไม่อย่างนั้นจะกดแย่งกัน
 - โฟลเดอร์ `/var/lib/hr-auto/browser-profile` บน Linux **ไม่ได้เข้ารหัสแบบ DPAPI** ป้องกันด้วยสิทธิ์ไฟล์ (`chmod 700`) เท่านั้น ห้ามให้คนอื่นมีสิทธิ์ root บนเครื่องนี้
+- 1 core / 2 GB คือขั้นต่ำ: คาดว่า 50 กลุ่มใช้ราว 30–45 นาทีต่อรอบ (ประมาณการ) ถ้าต้องการเร็วขึ้น อัปเกรดเป็น 4 GB / 2 core ได้ผลมากกว่าแก้โค้ด
 
 ## 8. อัปเดตโปรแกรม
 
@@ -257,9 +310,11 @@ free -h                                    # ดู RAM
 ## 10. ถอนการติดตั้ง
 
 ```bash
-sudo systemctl disable --now hr-auto hr-auto-novnc hr-auto-vnc hr-auto-wm hr-auto-display
-sudo rm /etc/systemd/system/hr-auto*.service && sudo systemctl daemon-reload
+sudo systemctl disable --now hr-auto hr-auto-novnc hr-auto-vnc hr-auto-wm hr-auto-display hr-auto-backup.timer
+sudo rm /etc/systemd/system/hr-auto*.service /etc/systemd/system/hr-auto-backup.timer && sudo systemctl daemon-reload
+sudo rm -f /etc/nginx/sites-enabled/hr-auto /etc/nginx/sites-available/hr-auto /etc/nginx/snippets/hr-auto-*.conf && sudo systemctl reload nginx
 sudo rm -rf /opt/hr-auto
+# สำรองข้อมูลรายคืน: /var/backups/hr-auto
 # ข้อมูลและ Session Facebook (สำรองก่อนถ้ายังต้องใช้):
 # sudo rm -rf /var/lib/hr-auto /etc/hr-auto
 ```

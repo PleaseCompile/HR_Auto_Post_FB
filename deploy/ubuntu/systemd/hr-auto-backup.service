@@ -1,0 +1,8 @@
+[Unit]
+Description=HR Auto daily backup (database, Draft images, audit log)
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/bin/bash /opt/hr-auto/deploy/ubuntu/backup.sh

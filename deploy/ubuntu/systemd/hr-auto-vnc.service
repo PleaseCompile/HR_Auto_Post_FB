@@ -5,9 +5,10 @@ After=hr-auto-display.service
 
 [Service]
 User=hrauto
+EnvironmentFile=-/etc/hr-auto/vnc.env
 ExecStartPre=/bin/sleep 1
-# -localhost: never reachable from the network; noVNC/SSH/Tailscale reach it locally.
-ExecStart=/usr/bin/x11vnc -display :99 -rfbauth /etc/hr-auto/vnc.pass -localhost -rfbport 5900 -forever -shared -noxdamage -quiet
+# 127.0.0.1 only: noVNC/Nginx/SSH/Tailscale reach it locally.
+ExecStart=/bin/bash /opt/hr-auto/deploy/ubuntu/vnc-server.sh
 Restart=always
 RestartSec=3
 

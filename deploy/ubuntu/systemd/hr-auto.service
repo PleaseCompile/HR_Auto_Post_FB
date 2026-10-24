@@ -16,6 +16,10 @@ KillSignal=SIGTERM
 TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5
+# When memory runs out, the kernel should kill a Chromium tab (the app raises
+# those to +600), never this process. systemd-oomd should also leave us alone.
+OOMScoreAdjust=-500
+ManagedOOMPreference=avoid
 
 [Install]
 WantedBy=multi-user.target

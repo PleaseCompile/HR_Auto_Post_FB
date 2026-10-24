@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the HR Auto backup every night
+
+[Timer]
+# 03:30, outside the morning/noon/evening posting rounds.
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

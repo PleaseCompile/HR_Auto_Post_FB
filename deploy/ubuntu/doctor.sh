@@ -59,8 +59,52 @@ fi
 echo "== Chromium"
 if ls /opt/hr-auto/browsers/chromium-*/chrome-linux*/chrome >/dev/null 2>&1; then ok "Chromium found in /opt/hr-auto/browsers"; else bad "Chromium missing -> run install.sh again"; fi
 
-echo "== VNC password"
-if [[ -f /etc/hr-auto/vnc.pass ]]; then ok "/etc/hr-auto/vnc.pass exists"; else bad "missing -> run install.sh again"; fi
+echo "== Browser view (VNC)"
+if grep -q "^HR_AUTO_VNC_AUTH=none" /etc/hr-auto/vnc.env 2>/dev/null; then
+  ok "protected by the team login through Nginx (no VNC password)"
+elif [[ -f /etc/hr-auto/vnc.pass ]]; then
+  ok "VNC password set (sudo cat /etc/hr-auto/vnc-password.txt)"
+else
+  bad "VNC password missing -> run install.sh again"
+fi
+
+echo "== Access and security"
+ACCESS=""; DOMAIN=""
+# shellcheck disable=SC1091
+[[ -f /etc/hr-auto/install.conf ]] && . /etc/hr-auto/install.conf
+echo "  access mode: ${ACCESS:-unknown}"
+if grep -q "^HR_AUTO_PASSWORD_HASH=scrypt:" "$ENV_FILE" 2>/dev/null; then ok "team login is ON"; else
+  if [[ "$ACCESS" == "tailscale" ]]; then echo "  team login is off (tailscale mode)"; else bad "team login is OFF -> sudo HR_AUTO_RESET_PASSWORD=1 bash deploy/ubuntu/install.sh"; fi
+fi
+if [[ "$ACCESS" == "public" || "$ACCESS" == "lan" ]]; then
+  if systemctl is-active --quiet nginx; then ok "nginx running"; else bad "nginx not running -> journalctl -u nginx -n 40"; fi
+  nginx -t >/dev/null 2>&1 && ok "nginx config valid" || bad "nginx config invalid -> sudo nginx -t"
+fi
+if [[ "$ACCESS" == "public" && -n "$DOMAIN" ]]; then
+  CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+  if [[ -f "$CERT" ]]; then
+    EXPIRY="$(openssl x509 -enddate -noout -in "$CERT" | cut -d= -f2)"
+    DAYS_LEFT=$(( ( $(date -d "$EXPIRY" +%s) - $(date +%s) ) / 86400 ))
+    if (( DAYS_LEFT > 14 )); then ok "certificate valid for $DAYS_LEFT more days (auto-renews)"; else bad "certificate expires in $DAYS_LEFT days -> sudo certbot renew"; fi
+  else
+    bad "no certificate for $DOMAIN -> run install.sh again"
+  fi
+  CODE="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://$DOMAIN/login" || true)"
+  [[ "$CODE" == "200" ]] && ok "https://$DOMAIN/login answers" || bad "https://$DOMAIN/login answered $CODE"
+  CODE="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://$DOMAIN/api/runs" || true)"
+  [[ "$CODE" == "401" ]] && ok "API refuses visitors without a login (401)" || bad "API without login answered $CODE (expected 401)"
+  ufw status 2>/dev/null | grep -q "Status: active" && ok "firewall active" || bad "firewall off -> sudo ufw enable"
+fi
+
+echo "== Memory safety"
+swapon --show --noheadings 2>/dev/null | sed "s/^/  swap: /"
+[[ -z "$(swapon --show --noheadings 2>/dev/null)" ]] && bad "no swap at all"
+grep -q "^OOMScoreAdjust=-500" /etc/systemd/system/hr-auto.service 2>/dev/null && ok "server protected from the OOM killer" || bad "hr-auto.service lacks OOMScoreAdjust -> run install.sh again"
+
+echo "== Backups"
+LAST_BACKUP="$(ls -1t /var/backups/hr-auto/hr-auto-*.tar.gz 2>/dev/null | head -1)"
+[[ -n "$LAST_BACKUP" ]] && ok "latest backup: $LAST_BACKUP" || echo "  no backup yet (runs nightly at 03:30; now: sudo systemctl start hr-auto-backup)"
+systemctl is-active --quiet hr-auto-backup.timer && ok "nightly backup timer on" || bad "backup timer off -> sudo systemctl enable --now hr-auto-backup.timer"
 
 echo "== Tailscale"
 if command -v tailscale >/dev/null 2>&1; then
