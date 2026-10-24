@@ -5,9 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>HR Auto — ศูนย์ควบคุมโพสต์งาน</title>
-    <link rel="stylesheet" href="/styles.css?v=20261024-server-2" />
+    <link rel="stylesheet" href="/styles.css?v=20261024-ux-4" />
+    <link rel="stylesheet" href="/ux.css?v=20261024-ux-4" />
   </head>
   <body>
+    <div class="global-progress" id="globalProgress" role="progressbar" aria-label="กำลังโหลด" hidden></div>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
@@ -77,7 +79,27 @@
       </main>
     </div>
 
+    <!-- Phone navigation. Uses data-mobile-route (not data-route) so desktop
+         selectors and tests keep matching exactly one element per route. -->
+    <nav class="mobile-tabbar" aria-label="เมนูหลัก (มือถือ)">
+      <button class="tab-item is-active" data-mobile-route="dashboard"><span class="tab-icon">⌂</span><span>หน้าแรก</span></button>
+      <button class="tab-item" data-mobile-route="compose"><span class="tab-icon">＋</span><span>โพสต์</span></button>
+      <button class="tab-item" data-mobile-route="groups"><span class="tab-icon">◎</span><span>กลุ่ม</span></button>
+      <button class="tab-item" data-mobile-route="runs"><span class="tab-icon">▶</span><span>คิว</span><span class="tab-badge" id="runsTabBadge" hidden></span></button>
+      <button class="tab-item" data-mobile-more><span class="tab-icon">☰</span><span>เพิ่มเติม</span></button>
+    </nav>
+    <div class="more-sheet" id="moreSheet" hidden>
+      <div class="more-sheet-backdrop" data-mobile-more-close></div>
+      <div class="more-sheet-panel" role="menu">
+        <button class="more-item" data-mobile-route="pending"><span class="tab-icon">⌫</span><span><strong>ล้าง Pending</strong><small>ลบโพสต์ที่ค้างรออนุมัติ</small></span></button>
+        <button class="more-item" data-mobile-route="history"><span class="tab-icon">▤</span><span><strong>หลักฐาน</strong><small>ภาพหลักฐานการโพสต์ทั้งหมด</small></span></button>
+        <button class="more-item" data-mobile-route="settings"><span class="tab-icon">⚙</span><span><strong>ตั้งค่าและ Session</strong><small>ล็อกอิน Facebook · สถานะเครื่อง</small></span></button>
+      </div>
+    </div>
+
     <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+
+    <dialog id="appDialog" class="modal app-dialog" aria-labelledby="appDialogTitle"></dialog>
 
     <dialog id="groupDialog" class="modal">
       <form method="dialog" class="modal-card" id="groupForm">
@@ -155,6 +177,6 @@
       </div>
     </dialog>
 
-    <script type="module" src="/app.js?v=20261024-server-2"></script>
+    <script type="module" src="/app.js?v=20261024-ux-4"></script>
   </body>
 </html>

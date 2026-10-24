@@ -14,6 +14,15 @@ const state = {
   pendingSelectionInitFor: null,
   pendingExpanded: new Set(),
   selectedGroups: new Set(),
+  // Queue builder choices live in state so ticking another group (which
+  // re-renders the page) no longer resets the Draft, mode or Auto-confirm.
+  runForm: {
+    draftId: "",
+    mode: "assisted",
+    workflow: "hybrid-tabs",
+    tabLimit: "",
+    autoConfirm: false,
+  },
   editingDraftId: null,
   pendingFiles: [],
   groupSearch: "",
@@ -173,6 +182,15 @@ function windowBatchSummary(total, limit = 30) {
   };
 }
 
+/** Tabs to open at once by default, sized to the machine HR Auto runs on. */
+function recommendedTabLimit(workflow = state.runForm?.workflow) {
+  if (workflow === "hybrid-windows") return "30";
+  const totalBytes = Number(state.system?.memory?.totalBytes || 0);
+  if (totalBytes && totalBytes < 6 * 1024 ** 3) return "4";
+  if (totalBytes && totalBytes < 12 * 1024 ** 3) return "8";
+  return "10";
+}
+
 function truncate(value, length = 70) {
   if (!value) return "ยังไม่มีข้อความ";
   return value.length > length ? `${value.slice(0, length)}…` : value;
@@ -242,39 +260,202 @@ function visualState(status) {
   return "neutral";
 }
 
+const toastIcons = { success: "✓", error: "!", info: "i" };
+
 function toast(message, type = "success") {
+  const kind = toastIcons[type] ? type : "success";
   const item = document.createElement("div");
-  item.className = `toast ${type === "error" ? "error" : ""}`;
-  item.textContent = message;
+  item.className = `toast ${kind === "success" ? "" : kind}`;
+  item.setAttribute("role", kind === "error" ? "alert" : "status");
+  item.innerHTML = `<span class="toast-icon" aria-hidden="true">${toastIcons[kind]}</span><span class="toast-text"></span>`;
+  item.querySelector(".toast-text").textContent = message;
+  item.addEventListener("click", () => item.remove());
   toastRegion.append(item);
-  window.setTimeout(() => item.remove(), 4500);
+  // Errors stay longer: on a phone the user is often looking away when they land.
+  window.setTimeout(() => item.remove(), kind === "error" ? 9000 : 4500);
+}
+
+/* ---------- Loading feedback ----------
+   Every request the user triggers lights a thin progress bar at the top of the
+   screen (after 200 ms, so fast requests do not flicker). Background polling
+   passes { quiet: true } so the bar only means "something you asked for". */
+const globalProgress = document.querySelector("#globalProgress");
+let visibleRequests = 0;
+let progressTimer = 0;
+
+function trackRequest(delta) {
+  visibleRequests = Math.max(0, visibleRequests + delta);
+  window.clearTimeout(progressTimer);
+  if (visibleRequests > 0) {
+    progressTimer = window.setTimeout(() => {
+      globalProgress.hidden = false;
+      document.body.classList.add("is-busy");
+    }, 200);
+  } else {
+    globalProgress.hidden = true;
+    document.body.classList.remove("is-busy");
+  }
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, {
-    headers:
-      options.body instanceof FormData
-        ? options.headers
-        : { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-  const contentType = response.headers.get("content-type") || "";
-  const body = contentType.includes("application/json") ? await response.json() : null;
-  if (!response.ok) throw new Error(body?.error || `Request failed (${response.status})`);
-  return body;
+  const { quiet = false, ...fetchOptions } = options;
+  if (!quiet) trackRequest(1);
+  try {
+    const response = await fetch(url, {
+      headers:
+        fetchOptions.body instanceof FormData
+          ? fetchOptions.headers
+          : { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
+      ...fetchOptions,
+    });
+    const contentType = response.headers.get("content-type") || "";
+    const body = contentType.includes("application/json") ? await response.json() : null;
+    if (!response.ok) throw new Error(body?.error || `Request failed (${response.status})`);
+    return body;
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error("เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจอินเทอร์เน็ตหรือ Tailscale แล้วลองใหม่");
+    }
+    throw error;
+  } finally {
+    if (!quiet) trackRequest(-1);
+  }
 }
 
-async function refreshAll() {
+/* ---------- In-app dialogs ----------
+   Replace window.confirm / window.prompt: native dialogs can be suppressed on
+   mobile browsers (the action then silently does nothing), cannot be styled,
+   and are hard to read on a phone. */
+const appDialog = document.querySelector("#appDialog");
+
+function openAppDialog({
+  title = "ยืนยันการทำงาน",
+  message = "",
+  confirmText = "ยืนยัน",
+  cancelText = "ยกเลิก",
+  tone = "primary",
+  input = null,
+}) {
+  return new Promise((resolve) => {
+    appDialog.innerHTML = `
+      <form method="dialog" class="modal-card app-dialog-card">
+        <h2 id="appDialogTitle">${escapeHtml(title)}</h2>
+        ${message ? `<p class="app-dialog-message">${escapeHtml(message)}</p>` : ""}
+        ${
+          input
+            ? `<input class="app-dialog-input" autocomplete="off" value="${escapeHtml(input.value ?? "")}" placeholder="${escapeHtml(input.placeholder ?? "")}" ${input.inputMode ? `inputmode="${input.inputMode}"` : ""} />`
+            : ""
+        }
+        <div class="app-dialog-actions">
+          <button type="button" class="button button-ghost" data-dialog-cancel>${escapeHtml(cancelText)}</button>
+          <button type="submit" class="button ${tone === "danger" ? "button-danger-solid" : "button-primary"}" data-dialog-confirm>${escapeHtml(confirmText)}</button>
+        </div>
+      </form>
+    `;
+    const field = appDialog.querySelector(".app-dialog-input");
+    let settled = false;
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      if (appDialog.open) appDialog.close();
+      resolve(input ? (confirmed ? field.value : null) : confirmed);
+    };
+    appDialog.querySelector("form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      finish(true);
+    });
+    appDialog.querySelector("[data-dialog-cancel]").addEventListener("click", () => finish(false));
+    appDialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      finish(false);
+    }, { once: true });
+    appDialog.showModal();
+    if (field) {
+      field.focus();
+      field.select();
+    } else {
+      appDialog.querySelector("[data-dialog-confirm]").focus();
+    }
+  });
+}
+
+function uiConfirm(message, options = {}) {
+  return openAppDialog({ message, ...options });
+}
+
+function uiPrompt(message, defaultValue = "", options = {}) {
+  return openAppDialog({
+    message,
+    input: { value: defaultValue, placeholder: options.placeholder, inputMode: options.inputMode },
+    ...options,
+  });
+}
+
+/* ---------- Busy buttons ----------
+   A button the user pressed shows a spinner and ignores repeat taps until its
+   action finishes. Keys survive re-renders, so a button rebuilt by render()
+   is marked busy again. */
+const busyActions = new Set();
+
+function actionKey(element) {
+  const data = element.dataset;
+  return [data.action, data.id, data.run, data.target, data.value].join("|");
+}
+
+function syncBusyButtons() {
+  document.querySelectorAll("[data-action]").forEach((element) => {
+    const busy = busyActions.has(actionKey(element));
+    element.classList.toggle("is-loading", busy);
+    if (element.tagName !== "BUTTON") return;
+    if (busy && element.getAttribute("aria-busy") !== "true") {
+      element.dataset.wasDisabled = String(element.disabled);
+      element.disabled = true;
+      element.setAttribute("aria-busy", "true");
+    } else if (!busy && element.getAttribute("aria-busy") === "true") {
+      element.disabled = element.dataset.wasDisabled === "true";
+      delete element.dataset.wasDisabled;
+      element.removeAttribute("aria-busy");
+    }
+  });
+}
+
+// Actions that only open or close local UI never need a spinner.
+const instantActions = new Set([
+  "add-group", "close-group", "open-scan", "close-scan", "close-evidence",
+  "import-csv", "go-groups", "clear-selection", "manage-evidence",
+  "scroll-to-run-form",
+]);
+
+async function runAction(button, options) {
+  const key = actionKey(button);
+  if (busyActions.has(key)) return;
+  const tracked = !instantActions.has(button.dataset.action);
+  if (tracked) {
+    busyActions.add(key);
+    syncBusyButtons();
+  }
+  try {
+    await handleAction(button, options);
+  } finally {
+    if (tracked) {
+      busyActions.delete(key);
+      syncBusyButtons();
+    }
+  }
+}
+
+async function refreshAll({ quiet = false } = {}) {
+  const request = (url) => api(url, { quiet });
   const [dashboard, drafts, groups, runs, groupScan, manualEvidence, pendingCleanup, system] =
     await Promise.all([
-      api("/api/dashboard"),
-      api("/api/drafts"),
-      api("/api/groups"),
-      api("/api/runs"),
-      api("/api/groups/scan"),
-      api("/api/manual-evidence"),
-      api("/api/pending-cleanup"),
-      api("/api/system").catch(() => null),
+      request("/api/dashboard"),
+      request("/api/drafts"),
+      request("/api/groups"),
+      request("/api/runs"),
+      request("/api/groups/scan"),
+      request("/api/manual-evidence"),
+      request("/api/pending-cleanup"),
+      request("/api/system").catch(() => null),
     ]);
   state.system = system;
   state.dashboard = dashboard;
@@ -305,15 +486,59 @@ function renderSession(session) {
   }
 }
 
+function routeFromHash() {
+  const route = window.location.hash.replace(/^#/, "");
+  return routes[route] ? route : "dashboard";
+}
+
 function navigate(route) {
   state.route = route;
+  // Keep the page in the URL: phones reload background tabs often, and a
+  // reload should land back on the same page.
+  if (window.location.hash !== `#${route}`) {
+    history.replaceState(null, "", `#${route}`);
+  }
   const [eyebrow, title] = routes[route] || routes.dashboard;
   pageEyebrow.textContent = eyebrow;
   pageTitle.textContent = title;
   document.querySelectorAll(".nav-item[data-route]").forEach((item) => {
     item.classList.toggle("is-active", item.dataset.route === route);
   });
+  const inMoreSheet = ["pending", "history", "settings"].includes(route);
+  document.querySelectorAll(".tab-item").forEach((item) => {
+    const active =
+      item.dataset.mobileRoute === route ||
+      (item.hasAttribute("data-mobile-more") && inMoreSheet);
+    item.classList.toggle("is-active", active);
+  });
+  closeMoreSheet();
   render();
+  window.scrollTo({ top: 0 });
+}
+
+const moreSheet = document.querySelector("#moreSheet");
+
+function closeMoreSheet() {
+  moreSheet.hidden = true;
+}
+
+/** Number of things in the queue that are waiting on the user. */
+function runsNeedingAttention() {
+  let count = 0;
+  for (const run of state.runs || []) {
+    for (const target of run.targets || []) {
+      if (["awaiting_confirmation", "manual_action_required"].includes(target.status)) count += 1;
+    }
+  }
+  return count;
+}
+
+function renderRunsTabBadge() {
+  const badge = document.querySelector("#runsTabBadge");
+  if (!badge) return;
+  const count = runsNeedingAttention();
+  badge.hidden = count === 0;
+  badge.textContent = count > 99 ? "99+" : String(count);
 }
 
 function render() {
@@ -328,6 +553,8 @@ function render() {
   }[state.route];
   app.innerHTML = renderer ? renderer() : renderDashboard();
   bindRouteEvents();
+  syncBusyButtons();
+  renderRunsTabBadge();
 }
 
 function metricCard(label, value, caption, icon) {
@@ -578,8 +805,8 @@ function renderGroupRows(groups) {
             ? ["โพสต์ไม่ได้", "danger"]
             : ["ยังไม่ตรวจ", "warning"];
       return `
-        <tr>
-          <td class="col-check"><input type="checkbox" class="group-check" value="${group.id}" ${state.selectedGroups.has(group.id) ? "checked" : ""} /></td>
+        <tr class="group-row ${state.selectedGroups.has(group.id) ? "is-selected" : ""}">
+          <td class="col-check"><input type="checkbox" class="group-check" value="${group.id}" aria-label="เลือก ${escapeHtml(group.name)}" ${state.selectedGroups.has(group.id) ? "checked" : ""} /></td>
           <td>
             <div class="group-name">
               <div class="group-avatar">${escapeHtml(group.name.slice(0, 1).toUpperCase())}</div>
@@ -596,10 +823,10 @@ function renderGroupRows(groups) {
               </div>
             </div>
           </td>
-          <td>${escapeHtml(group.province || "—")}</td>
-          <td><div class="tag-list">${group.tags.length ? group.tags.slice(0, 4).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("") : '<span class="muted">—</span>'}</div></td>
-          <td><span class="badge ${canPost[1]}">${canPost[0]}</span>${group.requiresApproval ? '<br><span class="badge warning" style="margin-top:4px">รออนุมัติ</span>' : ""}</td>
-          <td class="nowrap">${group.lastPostedAt ? formatDate(group.lastPostedAt, true) : "ยังไม่เคย"}</td>
+          <td class="col-meta ${group.province ? "" : "is-empty"}" data-label="พื้นที่">${escapeHtml(group.province || "—")}</td>
+          <td class="col-meta ${group.tags.length ? "" : "is-empty"}" data-label="แท็ก"><div class="tag-list">${group.tags.length ? group.tags.slice(0, 4).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("") : '<span class="muted">—</span>'}</div></td>
+          <td class="col-meta" data-label="สิทธิ์โพสต์"><span class="badge ${canPost[1]}">${canPost[0]}</span>${group.requiresApproval ? '<br><span class="badge warning" style="margin-top:4px">รออนุมัติ</span>' : ""}</td>
+          <td class="col-meta nowrap" data-label="โพสต์ล่าสุด">${group.lastPostedAt ? formatDate(group.lastPostedAt, true) : "ยังไม่เคย"}</td>
         </tr>
       `;
     })
@@ -670,45 +897,66 @@ function renderGroups() {
     ${
       selected
         ? `
-          <div class="selection-bar">
-            <strong>เลือกแล้ว ${selected.toLocaleString("th-TH")} กลุ่ม</strong>
-            <div class="toolbar-end">
-              <select id="runDraft" style="width:290px">
-                <option value="">เลือก Draft สำหรับคิวนี้</option>
-                ${state.drafts.map((draft) => `<option value="${draft.id}">${formatDate(draft.workDate)} · ${slotLabels[draft.slot]} · ${escapeHtml(truncate(draft.text, 38))}</option>`).join("")}
-              </select>
-              <select id="runMode" style="width:310px">
-                <option value="assisted">โพสต์จริงแบบ Assisted — รอยืนยันทุกกลุ่ม</option>
-                <option value="dry-run">Dry run — ตรวจกลุ่มเท่านั้น ไม่โพสต์</option>
-              </select>
-              <select id="runWorkflow" style="width:270px">
-                <option value="hybrid-tabs">Hybrid แนะนำ — เติมงานต่อเนื่อง</option>
-                <option value="hybrid-windows">หลายหน้าต่าง — ไม่ปิดแท็บเอง</option>
-              </select>
-              <select id="runTabLimit" style="width:190px" aria-label="จำนวนแท็บพร้อมกัน">
-                <option value="8">พร้อมกัน 8 แท็บ</option>
-                <option value="10" selected>พร้อมกัน 10 แท็บ (แนะนำ)</option>
-                <option value="15">พร้อมกัน 15 แท็บ</option>
-                <option value="20">พร้อมกัน 20 แท็บ</option>
-                <option value="30">พร้อมกัน 30 แท็บ (ขั้นสูง)</option>
-              </select>
-              <label class="auto-confirm-label" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;margin-left:4px" title="เมื่อเปิดโหมดนี้ ระบบจะทยอยกดโพสต์ให้อัตโนมัติโดยไม่ต้องกด 'ยืนยันและโพสต์' เองทีละกลุ่ม">
-                <input type="checkbox" id="runAutoConfirm" />
-                <span>โพสต์อัตโนมัติ (Auto-confirm)</span>
+          <section class="queue-builder" id="queueBuilder" aria-label="ตั้งค่าคิวโพสต์">
+            <header class="queue-builder-head">
+              <div>
+                <span class="eyebrow">ตั้งค่าคิวโพสต์</span>
+                <h3>เลือกแล้ว ${selected.toLocaleString("th-TH")} กลุ่ม</h3>
+              </div>
+              <button class="button button-ghost button-small" data-action="clear-selection">ล้างที่เลือก</button>
+            </header>
+            <div class="queue-fields">
+              <label class="field field-wide">
+                <span><b class="step-no">1</b> ข้อความที่จะโพสต์ (Draft)</span>
+                <select id="runDraft">
+                  <option value="">— เลือก Draft —</option>
+                  ${state.drafts.map((draft) => `<option value="${draft.id}" ${state.runForm.draftId === draft.id ? "selected" : ""}>${formatDate(draft.workDate)} · ${slotLabels[draft.slot]} · ${escapeHtml(truncate(draft.text, 38))}</option>`).join("")}
+                </select>
               </label>
-              <span id="runWindowPlan" class="muted" style="font-size:11px" hidden></span>
-              <button class="button button-primary" data-action="create-run">สร้างคิวโพสต์</button>
-              <button class="button button-danger" data-action="restart-draft-run" title="ลบทุกคิวเดิมของ Draft ที่เลือก แล้วสร้างคิวใหม่จากกลุ่มที่เลือกอยู่">
-                ล้างคิวเดิมทั้งหมดและสร้างใหม่
-              </button>
-              <button class="button button-ghost" data-action="clear-selection">ล้างที่เลือก</button>
+              <label class="field">
+                <span><b class="step-no">2</b> ประเภทคิว</span>
+                <select id="runMode">
+                  <option value="assisted" ${state.runForm.mode === "assisted" ? "selected" : ""}>โพสต์จริง</option>
+                  <option value="dry-run" ${state.runForm.mode === "dry-run" ? "selected" : ""}>Dry run — ตรวจกลุ่มเท่านั้น ไม่โพสต์</option>
+                </select>
+              </label>
+              <label class="field">
+                <span><b class="step-no">3</b> วิธีเปิดแท็บ</span>
+                <select id="runWorkflow">
+                  <option value="hybrid-tabs" ${state.runForm.workflow === "hybrid-tabs" ? "selected" : ""}>Hybrid (แนะนำ) — เติมแท็บต่อเนื่อง</option>
+                  <option value="hybrid-windows" ${state.runForm.workflow === "hybrid-windows" ? "selected" : ""}>หลายหน้าต่าง — ไม่ปิดแท็บเอง</option>
+                </select>
+              </label>
+              <label class="field">
+                <span><b class="step-no">4</b> จำนวนแท็บ</span>
+                <select id="runTabLimit" aria-label="จำนวนแท็บพร้อมกัน">
+                  <option value="${state.runForm.tabLimit || recommendedTabLimit()}" selected>พร้อมกัน ${state.runForm.tabLimit || recommendedTabLimit()} แท็บ</option>
+                </select>
+              </label>
             </div>
+            <label class="toggle-row">
+              <input type="checkbox" id="runAutoConfirm" class="toggle" ${state.runForm.autoConfirm ? "checked" : ""} />
+              <span class="toggle-text">
+                <strong>โพสต์อัตโนมัติ (Auto-confirm)</strong>
+                <small>ระบบกดโพสต์ให้เองทีละกลุ่ม ไม่ต้องกดยืนยันทุกครั้ง เหมาะกับสั่งงานจากมือถือ</small>
+              </span>
+            </label>
+            <p class="queue-summary" id="runSummary" aria-live="polite"></p>
+            <span id="runWindowPlan" class="muted queue-plan" hidden></span>
+            <div class="queue-actions">
+              <button class="button button-primary button-block" data-action="create-run">สร้างคิวโพสต์ (${selected.toLocaleString("th-TH")} กลุ่ม)</button>
+              <button class="button button-link-danger" data-action="restart-draft-run" title="ลบทุกคิวเดิมของ Draft ที่เลือก แล้วสร้างคิวใหม่จากกลุ่มที่เลือกอยู่">ล้างคิวเดิมทั้งหมดและสร้างใหม่</button>
+            </div>
+          </section>
+          <div class="selection-sticky" role="region" aria-label="กลุ่มที่เลือก">
+            <span><strong>${selected.toLocaleString("th-TH")}</strong> กลุ่มที่เลือก</span>
+            <button class="button button-primary button-small" data-action="scroll-to-run-form">ไปตั้งค่าคิว ↑</button>
           </div>
         `
         : ""
     }
     <div class="data-table-wrap">
-      <table class="data-table">
+      <table class="data-table groups-table">
         <thead>
           <tr>
             <th class="col-check"><input type="checkbox" id="selectAllGroups" aria-label="เลือกทั้งหมดในผลค้นหา" /></th>
@@ -1204,17 +1452,18 @@ function renderRuns() {
   }
   return `
     <div class="page-header">
-      <div><h2>คิวงานทั้งหมด</h2><p class="muted">Hybrid จะเติมงานต่อเนื่องตามเพดานแท็บ เมื่อคุณจัดการหนึ่งแท็บ ระบบจึงเตรียมกลุ่มถัดไป</p></div>
+      <div><h2>คิวงานทั้งหมด</h2><p class="muted">กดเริ่มคิวแล้วติดตามความคืบหน้าได้จากหน้านี้ หน้าจะอัปเดตเองทุก 3 วินาที</p></div>
       <button class="button button-ghost" data-action="refresh">รีเฟรชสถานะ</button>
     </div>
-    <div class="status-callout warning" style="margin-bottom:18px">
-      <div>!</div>
-      <div>
-        <strong>ความหมายของปุ่มระหว่าง “รอยืนยัน”</strong>
-        <span>ยืนยันและโพสต์ = ให้ระบบกด Post · ฉันโพสต์เองแล้ว = บันทึกผลและหลักฐานโดยไม่กดซ้ำ · ข้าม + หลักฐาน = แคปหน้าต่างก่อนปิดแท็บ</span>
-        <span>ค่าแนะนำคือ 10 แท็บพร้อมกัน ระบบจะพักการเปิดแท็บใหม่เมื่อ RAM เหลือน้อย และลดเพดานเองเมื่อพบ timeout หรือ renderer crash</span>
-      </div>
-    </div>
+    <details class="help-details">
+      <summary>ปุ่มแต่ละปุ่มทำอะไร?</summary>
+      <ul>
+        <li><b>ยืนยันและโพสต์</b> ให้ระบบกดปุ่ม Post ในแท็บนั้น</li>
+        <li><b>ฉันโพสต์เองแล้ว</b> บันทึกผลและเก็บหลักฐานโดยไม่กดโพสต์ซ้ำ (แตะ 3 ครั้งติดกันเพื่อข้ามกล่องยืนยัน)</li>
+        <li><b>ข้าม + หลักฐาน</b> แคปหน้าจอแล้วปิดแท็บ ไม่โพสต์กลุ่มนี้</li>
+        <li>ระบบพักการเปิดแท็บใหม่เองเมื่อ RAM เหลือน้อย และลดจำนวนแท็บเมื่อเจอ timeout หรือแท็บ crash</li>
+      </ul>
+    </details>
     <div class="status-legend" aria-label="คำอธิบายสีสถานะ">
       <span class="status-legend-item done"><i></i>เสร็จแล้ว</span>
       <span class="status-legend-item active"><i></i>กำลังทำงาน</span>
@@ -1224,6 +1473,92 @@ function renderRuns() {
     </div>
     ${state.runs.map(renderRunCard).join("")}
   `;
+}
+
+function runProgress(run) {
+  const targets = run.targets || [];
+  const count = (statuses) => targets.filter((target) => statuses.includes(target.status)).length;
+  const progress = {
+    total: targets.length,
+    done: count(["published", "pending_review", "dry_run_ready"]),
+    attention: count(["awaiting_confirmation", "manual_action_required"]),
+    active: count(["opening", "preparing", "submitting"]),
+    failed: count(["failed"]),
+    skipped: count(["skipped"]),
+  };
+  progress.waiting = Math.max(
+    0,
+    progress.total - progress.done - progress.attention - progress.active - progress.failed - progress.skipped,
+  );
+  return progress;
+}
+
+function renderRunProgress(progress) {
+  if (!progress.total) return "";
+  const width = (value) => `${((value / progress.total) * 100).toFixed(2)}%`;
+  const finished = progress.done + progress.failed + progress.skipped;
+  const parts = [
+    `<b>${progress.done}</b> สำเร็จ`,
+    progress.attention ? `<b class="text-attention">${progress.attention}</b> รอคุณ` : "",
+    progress.failed ? `<b class="text-danger">${progress.failed}</b> ไม่สำเร็จ` : "",
+    progress.skipped ? `<b>${progress.skipped}</b> ข้าม` : "",
+    progress.waiting ? `<b>${progress.waiting}</b> ยังไม่ถึงคิว` : "",
+  ].filter(Boolean);
+  return `
+    <div class="run-progress">
+      <div class="run-progress-bar" role="img" aria-label="เสร็จ ${finished} จาก ${progress.total} กลุ่ม">
+        <span class="seg done" style="width:${width(progress.done)}"></span>
+        <span class="seg attention" style="width:${width(progress.attention)}"></span>
+        <span class="seg active" style="width:${width(progress.active)}"></span>
+        <span class="seg failed" style="width:${width(progress.failed)}"></span>
+        <span class="seg skipped" style="width:${width(progress.skipped)}"></span>
+      </div>
+      <div class="run-progress-text">
+        <span class="run-progress-count">${finished}/${progress.total}</span>
+        <span>${parts.join(" · ")}</span>
+      </div>
+    </div>
+  `;
+}
+
+function runNowLine(run, progress) {
+  const targets = run.targets || [];
+  const working = targets.find((target) => ["submitting", "preparing", "opening"].includes(target.status));
+  const pressure = targets.find((target) => /พักการเปิดแท็บใหม่/.test(target.message || ""));
+  const groupName = (target) => escapeHtml(truncate(target?.group?.name || "กลุ่ม", 48));
+  if (run.status === "paused") {
+    return { tone: "warning", text: "พักอยู่ · กด <b>ทำต่อ</b> เมื่อพร้อม" };
+  }
+  if (["running", "awaiting_confirmation"].includes(run.status)) {
+    if (progress.attention && !run.autoConfirm) {
+      return {
+        tone: "attention",
+        text: `มี <b>${progress.attention}</b> กลุ่มรอคุณ · เลื่อนลงไปกดยืนยันได้เลย`,
+      };
+    }
+    if (pressure && !working) {
+      return { tone: "warning", spin: true, text: "RAM เหลือน้อย · รอให้แท็บที่เปิดอยู่เสร็จก่อนเปิดกลุ่มถัดไป" };
+    }
+    if (working) {
+      return {
+        tone: "active",
+        spin: true,
+        text: `${statusLabels[working.status] || "กำลังทำงาน"}: ${groupName(working)}`,
+      };
+    }
+    return { tone: "active", spin: true, text: run.autoConfirm ? "กำลังรอเวลาสุ่มก่อนโพสต์กลุ่มถัดไป…" : "กำลังทำงาน…" };
+  }
+  if (run.status === "queued") return { tone: "neutral", text: "ยังไม่เริ่ม · กด <b>เริ่มคิว</b> เพื่อเริ่มทำงาน" };
+  if (run.status === "interrupted") {
+    return {
+      tone: "warning",
+      text: "ถูกขัดจังหวะ (โปรแกรมรีสตาร์ท) · ตรวจกลุ่มที่ “ต้องตรวจ” ใน Facebook ก่อน แล้วกดเริ่มคิวเพื่อทำต่อ",
+    };
+  }
+  if (run.status === "stopped") return { tone: "neutral", text: "คิวนี้ถูกหยุด · กด <b>เริ่มคิว</b> เพื่อทำส่วนที่เหลือต่อ" };
+  if (run.status === "failed") return { tone: "danger", text: "จบแบบมีรายการไม่สำเร็จ · กดลองใหม่เฉพาะรายการที่ไม่สำเร็จได้" };
+  if (run.status === "completed") return { tone: "done", text: run.mode === "dry-run" ? "ตรวจครบแล้ว" : "เสร็จครบทุกกลุ่มแล้ว" };
+  return null;
 }
 
 function renderRunCard(run) {
@@ -1241,10 +1576,8 @@ function renderRunCard(run) {
     !active &&
     (run.targets || []).length > 0 &&
     submittingTargets.length === 0;
-  const counts = (run.targets || []).reduce((map, target) => {
-    map[target.status] = (map[target.status] || 0) + 1;
-    return map;
-  }, {});
+  const progress = runProgress(run);
+  const nowLine = runNowLine(run, progress);
   const bulkMarkableTargets = (run.targets || []).filter((target) =>
     isBulkMarkable(run, target),
   );
@@ -1262,7 +1595,7 @@ function renderRunCard(run) {
   return `
     <article class="run-card run-state-${visualState(run.status)}">
       <div class="run-summary">
-        <div>
+        <div class="run-summary-main">
           <div class="run-title">
             <h3>${formatDate(run.draft?.workDate)} · ${slotLabels[run.draft?.slot] || "ไม่ระบุช่วง"}</h3>
             <span class="badge ${statusClass(run.status)}">${
@@ -1270,27 +1603,33 @@ function renderRunCard(run) {
                 ? "ตรวจสอบเสร็จ"
                 : statusLabels[run.status] || run.status
             }</span>
-            ${run.autoConfirm ? '<span class="badge info">AUTO-CONFIRM</span>' : ""}
-            <span class="tag">${
-              run.mode === "dry-run"
-                ? "DRY RUN · ไม่โพสต์"
-                : run.workflow === "hybrid-windows"
-                  ? `หลายหน้าต่าง · ${run.tabLimit || 30} แท็บ/หน้าต่าง · ไม่ปิดเอง`
-                  : run.workflow === "hybrid-tabs"
-                  ? `HYBRID · เติมต่อเนื่องสูงสุด ${run.tabLimit || 10} แท็บ`
-                  : "ทีละกลุ่ม · แท็บใหม่"
-            }</span>
+            ${run.autoConfirm ? '<span class="badge info">โพสต์อัตโนมัติ</span>' : ""}
           </div>
           <div class="run-meta">
+            <span>${
+              run.mode === "dry-run"
+                ? "Dry run · ไม่โพสต์"
+                : run.workflow === "hybrid-windows"
+                  ? `หลายหน้าต่าง · ${run.tabLimit || 30} แท็บ/หน้าต่าง`
+                  : run.workflow === "hybrid-tabs"
+                    ? `Hybrid · สูงสุด ${run.tabLimit || 10} แท็บ`
+                    : "ทีละกลุ่ม"
+            }</span>
             <span>${run.targets?.length || 0} กลุ่ม</span>
-            <span>เผยแพร่ ${counts.published || 0}</span>
-            <span>รออนุมัติ ${counts.pending_review || 0}</span>
-            <span>รอคุณ ${counts.awaiting_confirmation || 0}</span>
-            <span>ข้าม ${counts.skipped || 0}</span>
             <span>สร้างเมื่อ ${formatDate(run.createdAt, true)}</span>
           </div>
+          ${renderRunProgress(progress)}
+          ${
+            nowLine
+              ? `<p class="run-now tone-${nowLine.tone}">${nowLine.spin ? '<span class="spinner spinner-inline" aria-hidden="true"></span>' : ""}<span>${nowLine.text}</span></p>`
+              : ""
+          }
         </div>
         <div class="run-actions">
+          ${["queued", "interrupted", "stopped"].includes(run.status) ? `<button class="button button-small button-primary" data-action="start-run" data-id="${run.id}">▶ เริ่มคิว</button>` : ""}
+          ${run.status === "paused" ? `<button class="button button-small button-primary" data-action="resume-run" data-id="${run.id}">▶ ทำต่อ</button>` : ""}
+          ${active && run.status !== "paused" ? `<button class="button button-small button-secondary" data-action="pause-run" data-id="${run.id}">⏸ พัก</button>` : ""}
+          ${active ? `<button class="button button-small button-danger" data-action="stop-run" data-id="${run.id}">■ หยุด</button>` : ""}
           ${
             run.mode === "assisted" &&
             ["completed", "failed"].includes(run.status) &&
@@ -1311,13 +1650,9 @@ function renderRunCard(run) {
                 }</button>`
               : ""
           }
-          ${["queued", "interrupted", "stopped"].includes(run.status) ? `<button class="button button-small button-primary" data-action="start-run" data-id="${run.id}">เริ่มคิว</button>` : ""}
-          ${active && run.status !== "paused" ? `<button class="button button-small button-ghost" data-action="pause-run" data-id="${run.id}">พัก</button>` : ""}
-          ${run.status === "paused" ? `<button class="button button-small button-primary" data-action="resume-run" data-id="${run.id}">ทำต่อ</button>` : ""}
-          ${active ? `<button class="button button-small button-danger" data-action="stop-run" data-id="${run.id}">หยุด</button>` : ""}
           ${
             canDeleteRun
-              ? `<button class="button button-small button-danger" data-action="delete-run" data-id="${run.id}" data-uncertain="${uncertainTargets.length}" data-posted="${postedTargets.length}">ลบทั้งคิว</button>`
+              ? `<button class="button button-small button-link-danger" data-action="delete-run" data-id="${run.id}" data-uncertain="${uncertainTargets.length}" data-posted="${postedTargets.length}">ลบทั้งคิว</button>`
               : ""
           }
         </div>
@@ -1382,10 +1717,10 @@ function renderRunCard(run) {
                   ${
                     target.status === "awaiting_confirmation"
                       ? `
-                        <button class="button button-small button-ghost" data-action="focus-target" data-run="${run.id}" data-target="${target.id}">เปิดแท็บ</button>
-                        <button class="button button-small button-ghost" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="skip">ข้าม + หลักฐาน</button>
+                        <button class="button button-small button-primary target-primary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="confirm">ยืนยันและโพสต์</button>
                         <button class="button button-small button-secondary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="mark-posted" title="คลิกปกติจะถามยืนยัน · คลิก 3 ครั้งติดกันเพื่อบันทึกทันที" ${bulkJob ? "disabled" : ""}>ฉันโพสต์เองแล้ว</button>
-                        <button class="button button-small button-primary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="confirm">ยืนยันและโพสต์</button>
+                        <button class="button button-small button-ghost" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="skip">ข้าม + หลักฐาน</button>
+                        <button class="button button-small button-ghost" data-action="focus-target" data-run="${run.id}" data-target="${target.id}">เปิดแท็บ</button>
                       `
                       : ""
                   }
@@ -2131,41 +2466,61 @@ async function saveDraft(event) {
 }
 
 function bindGroupEvents() {
+  const runDraft = document.querySelector("#runDraft");
   const runMode = document.querySelector("#runMode");
   const runWorkflow = document.querySelector("#runWorkflow");
   const runTabLimit = document.querySelector("#runTabLimit");
+  const runAutoConfirm = document.querySelector("#runAutoConfirm");
   const runWindowPlan = document.querySelector("#runWindowPlan");
+  const runSummary = document.querySelector("#runSummary");
+  const describeQueue = () => {
+    const count = state.selectedGroups.size.toLocaleString("th-TH");
+    if (runMode.value === "dry-run") {
+      return `ตรวจ ${count} กลุ่มว่าเปิดโพสต์ได้ไหม · <b>ไม่โพสต์จริง</b>`;
+    }
+    const tabs = runTabLimit.value;
+    const tabsText =
+      runWorkflow.value === "hybrid-windows"
+        ? `หน้าต่างละ ${tabs} แท็บ (ต้องปิดแท็บเอง)`
+        : `เปิดพร้อมกันสูงสุด ${tabs} แท็บ`;
+    const who = runAutoConfirm.checked
+      ? "<b>ระบบกดโพสต์ให้เอง</b>"
+      : "คุณกดยืนยันเองทีละกลุ่ม";
+    return `โพสต์จริง ${count} กลุ่ม · ${tabsText} · ${who}`;
+  };
   const syncRunWorkflowControls = () => {
     if (!runMode || !runWorkflow || !runTabLimit) return;
     const assisted = runMode.value === "assisted";
     const windowed = runWorkflow.value === "hybrid-windows";
-    const hybrid = runWorkflow.value === "hybrid-tabs";
     const currentValue = runTabLimit.value;
     runWorkflow.disabled = !assisted;
-    runTabLimit.disabled = !assisted || (!windowed && !hybrid);
-    if (windowed || hybrid) {
-      const unitLabel = windowed ? "แท็บต่อหน้าต่าง" : "พร้อมกัน";
-      const suffix = (value, note) =>
-        windowed ? `${value} แท็บต่อหน้าต่าง${note ? ` (${note})` : ""}` : `${unitLabel} ${value} แท็บ${note ? ` (${note})` : ""}`;
-      const allowed = ["4", "8", "10", "15", "20", "30", "50", "100"];
-      const recommendedValue = windowed ? "30" : "10";
-      let optionsHtml = allowed
-        .map(
-          (value) =>
-            `<option value="${value}">${suffix(value, value === recommendedValue ? "แนะนำ" : "")}</option>`,
-        )
-        .join("");
-      optionsHtml += `<option value="custom">กำหนดเอง…</option>`;
-      if (currentValue && !allowed.includes(currentValue) && currentValue !== "custom") {
-        optionsHtml = `<option value="${currentValue}" selected>${suffix(currentValue, "กำหนดเอง")}</option>` + optionsHtml;
-      }
-      runTabLimit.innerHTML = optionsHtml;
-      if (currentValue && (allowed.includes(currentValue) || currentValue === "custom")) {
-        runTabLimit.value = currentValue;
-      } else {
-        runTabLimit.value = recommendedValue;
-      }
+    runTabLimit.disabled = !assisted;
+    if (runAutoConfirm) {
+      runAutoConfirm.disabled = !assisted;
+      runAutoConfirm.closest(".toggle-row")?.classList.toggle("is-disabled", !assisted);
     }
+    const recommendedValue = recommendedTabLimit(runWorkflow.value);
+    const suffix = (value, note) =>
+      windowed
+        ? `${value} แท็บต่อหน้าต่าง${note ? ` (${note})` : ""}`
+        : `พร้อมกัน ${value} แท็บ${note ? ` (${note})` : ""}`;
+    const allowed = ["4", "8", "10", "15", "20", "30", "50", "100"];
+    let optionsHtml = allowed
+      .map(
+        (value) =>
+          `<option value="${value}">${suffix(value, value === recommendedValue ? "แนะนำ" : "")}</option>`,
+      )
+      .join("");
+    optionsHtml += `<option value="custom">กำหนดเอง…</option>`;
+    if (currentValue && !allowed.includes(currentValue) && currentValue !== "custom") {
+      optionsHtml = `<option value="${currentValue}">${suffix(currentValue, "กำหนดเอง")}</option>` + optionsHtml;
+    }
+    runTabLimit.innerHTML = optionsHtml;
+    const keep = currentValue && currentValue !== "custom";
+    // Switching between Hybrid and multi-window changes the sensible default.
+    runTabLimit.value = keep && runTabLimit.dataset.workflow === runWorkflow.value ? currentValue : recommendedValue;
+    runTabLimit.dataset.workflow = runWorkflow.value;
+    state.runForm.tabLimit = runTabLimit.value;
     if (runWindowPlan) {
       runWindowPlan.hidden = !assisted || !windowed;
       runWindowPlan.textContent = windowBatchSummary(
@@ -2173,15 +2528,34 @@ function bindGroupEvents() {
         Number(runTabLimit.value || 30),
       ).text;
     }
+    if (runSummary) runSummary.innerHTML = describeQueue();
   };
-  runMode?.addEventListener("change", syncRunWorkflowControls);
-  runWorkflow?.addEventListener("change", syncRunWorkflowControls);
-  runTabLimit?.addEventListener("change", () => {
+  if (runTabLimit) runTabLimit.dataset.workflow = runWorkflow?.value || "";
+  runDraft?.addEventListener("change", () => {
+    state.runForm.draftId = runDraft.value;
+  });
+  runMode?.addEventListener("change", () => {
+    state.runForm.mode = runMode.value;
+    syncRunWorkflowControls();
+  });
+  runWorkflow?.addEventListener("change", () => {
+    state.runForm.workflow = runWorkflow.value;
+    syncRunWorkflowControls();
+  });
+  runAutoConfirm?.addEventListener("change", () => {
+    state.runForm.autoConfirm = runAutoConfirm.checked;
+    if (runSummary) runSummary.innerHTML = describeQueue();
+  });
+  runTabLimit?.addEventListener("change", async () => {
     if (runTabLimit.value === "custom") {
       const windowed = runWorkflow?.value === "hybrid-windows";
       const promptLabel = windowed ? "จำนวนแท็บต่อหน้าต่าง" : "จำนวนแท็บพร้อมกัน";
-      const fallback = windowed ? "30" : "10";
-      const inputVal = window.prompt(`ระบุ${promptLabel} (1-250):`, "50");
+      const fallback = recommendedTabLimit(runWorkflow?.value);
+      const inputVal = await uiPrompt("ใส่ตัวเลข 1–250", fallback, {
+        title: `กำหนด${promptLabel}เอง`,
+        confirmText: "ใช้ค่านี้",
+        inputMode: "numeric",
+      });
       const num = parseInt(inputVal || "", 10);
       if (num && num >= 1 && num <= 250) {
         const customOpt = document.createElement("option");
@@ -2189,13 +2563,13 @@ function bindGroupEvents() {
         customOpt.textContent = windowed
           ? `${num} แท็บต่อหน้าต่าง (กำหนดเอง)`
           : `พร้อมกัน ${num} แท็บ (กำหนดเอง)`;
-        customOpt.selected = true;
         runTabLimit.appendChild(customOpt);
         runTabLimit.value = String(num);
       } else {
         runTabLimit.value = fallback;
       }
     }
+    state.runForm.tabLimit = runTabLimit.value;
     syncRunWorkflowControls();
   });
   syncRunWorkflowControls();
@@ -2394,10 +2768,10 @@ async function handleAction(button, options = {}) {
         state.pendingSelected.has(group.id),
       );
       const posts = groups.reduce((total, group) => total + group.pendingCount, 0);
-      const typed = window.prompt(
-        `จะลบโพสต์ค้างสูงสุด ${posts} โพสต์ ใน ${groups.length} กลุ่ม และกู้คืนไม่ได้
-พิมพ์ ลบ เพื่อยืนยัน:`,
+      const typed = await uiPrompt(
+        `จะลบโพสต์ค้างสูงสุด ${posts} โพสต์ ใน ${groups.length} กลุ่ม และกู้คืนไม่ได้\n\nพิมพ์คำว่า ลบ เพื่อยืนยัน`,
         "",
+        { title: "ลบโพสต์ที่ค้างรออนุมัติ?", confirmText: "ลบ", tone: "danger", placeholder: "พิมพ์ ลบ" },
       );
       if ((typed || "").trim() !== "ลบ") {
         toast("ยกเลิกการลบแล้ว");
@@ -2464,8 +2838,9 @@ async function handleAction(button, options = {}) {
     } else if (action === "choose-evidence-replacement") {
       document.querySelector(`#evidenceReplace-${button.dataset.id}`)?.click();
     } else if (action === "delete-manual-evidence") {
-      const accepted = window.confirm(
-        "ลบหลักฐานที่อัปโหลดนี้ใช่ไหม?\n\nไฟล์จะถูกลบออกจากเครื่องและไม่สามารถกู้คืนจากแอปได้",
+      const accepted = await uiConfirm(
+        "ไฟล์จะถูกลบออกจากเครื่องและกู้คืนจากแอปไม่ได้",
+        { title: "ลบหลักฐานที่อัปโหลดนี้?", confirmText: "ลบ", tone: "danger" },
       );
       if (!accepted) return;
       await api(`/api/manual-evidence/${button.dataset.id}`, { method: "DELETE" });
@@ -2491,6 +2866,8 @@ async function handleAction(button, options = {}) {
       toast("ระบบจะหยุดหลังจบรอบปัจจุบันและบันทึกกลุ่มที่พบ");
     } else if (action === "import-csv") {
       document.querySelector("#csvInput")?.click();
+    } else if (action === "scroll-to-run-form") {
+      document.querySelector("#queueBuilder")?.scrollIntoView({ behavior: "smooth", block: "start" });
     } else if (action === "clear-selection") {
       state.selectedGroups.clear();
       render();
@@ -2509,8 +2886,9 @@ async function handleAction(button, options = {}) {
       const autoConfirm = Boolean(document.querySelector("#runAutoConfirm")?.checked);
       if (!draftId) throw new Error("กรุณาเลือก Draft");
       if (autoConfirm && mode === "assisted") {
-        const confirmed = window.confirm(
-          "คุณกำลังสร้างคิวโหมดโพสต์อัตโนมัติ (Auto-confirm)\n\nกรุณายืนยันว่า:\n1. ได้ตรวจข้อความ รูปภาพ และรายชื่อกลุ่มทั้งหมดแล้ว\n2. บัญชี Facebook ปัจจุบันไม่ได้ติด Security Check/CAPTCHA\n\nระบบจะทยอยกดโพสต์ให้อัตโนมัติและหยุดทันทีหากพบปัญหา\n\nกด OK เพื่อยืนยันและเริ่มงาน",
+        const confirmed = await uiConfirm(
+          "ก่อนเริ่ม ตรวจให้แน่ใจว่า\n• ข้อความ รูป และรายชื่อกลุ่มถูกต้อง\n• บัญชี Facebook ไม่ติด Security Check หรือ CAPTCHA\n\nเมื่อกดเริ่มคิว ระบบจะทยอยกดโพสต์ให้เอง และหยุดทันทีเมื่อพบปัญหา",
+          { title: "สร้างคิวโพสต์อัตโนมัติ?", confirmText: "ยืนยัน สร้างคิว" },
         );
         if (!confirmed) return;
       }
@@ -2552,9 +2930,10 @@ async function handleAction(button, options = {}) {
       if (!draftId) throw new Error("กรุณาเลือก Draft");
       const draftLabel =
         draftSelect?.selectedOptions?.[0]?.textContent?.trim() || "Draft ที่เลือก";
-      const typed = window.prompt(
-        `เริ่มใหม่ทั้งหมดสำหรับ ${draftLabel}\n\nระบบจะลบ “ทุกคิวเดิม” ที่อ้าง Draft นี้ รวมสถานะไม่สำเร็จ ต้องตรวจ เผยแพร่แล้ว และหลักฐานของคิว จากนั้นสร้างคิวใหม่ด้วย ${state.selectedGroups.size.toLocaleString("th-TH")} กลุ่มที่เลือกอยู่\n\nDraft ข้อความ รูปต้นฉบับ และคลังกลุ่มจะไม่ถูกลบ แต่มีความเสี่ยงโพสต์ซ้ำหากรายการเดิมเคยถูกส่งจริง\n\nหากตรวจ Facebook แล้วและต้องการทำต่อ ให้พิมพ์: เริ่มใหม่ทั้งหมด`,
+      const typed = await uiPrompt(
+        `${draftLabel}\n\nระบบจะลบ “ทุกคิวเดิม” ของ Draft นี้ (รวมที่เผยแพร่แล้วและหลักฐาน) แล้วสร้างคิวใหม่ด้วย ${state.selectedGroups.size.toLocaleString("th-TH")} กลุ่มที่เลือก\n\nDraft รูปต้นฉบับ และคลังกลุ่มไม่ถูกลบ แต่เสี่ยงโพสต์ซ้ำถ้ารายการเดิมเคยส่งจริง\n\nตรวจ Facebook แล้ว ให้พิมพ์: เริ่มใหม่ทั้งหมด`,
         "",
+        { title: "ล้างคิวเดิมทั้งหมดแล้วสร้างใหม่?", confirmText: "ล้างและสร้างใหม่", tone: "danger", placeholder: "พิมพ์ เริ่มใหม่ทั้งหมด" },
       );
       if (typed === null) return;
       if (typed.trim() !== "เริ่มใหม่ทั้งหมด") {
@@ -2562,8 +2941,9 @@ async function handleAction(button, options = {}) {
         return;
       }
       if (autoConfirm && mode === "assisted") {
-        const confirmed = window.confirm(
-          "คุณกำลังสร้างคิวโหมดโพสต์อัตโนมัติ (Auto-confirm)\n\nกรุณายืนยันว่าได้ตรวจข้อความ รูปภาพ และกลุ่มทั้งหมดแล้ว\n\nกด OK เพื่อยืนยันและเริ่มงาน",
+        const confirmed = await uiConfirm(
+          "ตรวจข้อความ รูป และรายชื่อกลุ่มทั้งหมดแล้ว ระบบจะทยอยกดโพสต์ให้เองเมื่อกดเริ่มคิว",
+          { title: "สร้างคิวโพสต์อัตโนมัติ?", confirmText: "ยืนยัน สร้างคิว" },
         );
         if (!confirmed) return;
       }
@@ -2636,9 +3016,10 @@ async function handleAction(button, options = {}) {
       const postedCount = Number(button.dataset.posted || 0);
       let acknowledgedPosted = false;
       if (postedCount > 0) {
-        const typed = window.prompt(
-          `คิวนี้มี ${postedCount} รายการที่เผยแพร่แล้วหรือรอแอดมิน\n\nการลบจะลบประวัติและหลักฐานทั้งคิว และอาจทำให้โพสต์ซ้ำเมื่อเริ่มใหม่\n\nหากตรวจ Facebook แล้วและต้องการลบจริง ให้พิมพ์: ลบทั้งคิว`,
+        const typed = await uiPrompt(
+          `คิวนี้มี ${postedCount} รายการที่เผยแพร่แล้วหรือรอแอดมิน\n\nการลบจะลบประวัติและหลักฐานทั้งคิว และอาจทำให้โพสต์ซ้ำเมื่อเริ่มใหม่\n\nตรวจ Facebook แล้ว ให้พิมพ์: ลบทั้งคิว`,
           "",
+          { title: "ลบทั้งคิว?", confirmText: "ลบทั้งคิว", tone: "danger", placeholder: "พิมพ์ ลบทั้งคิว" },
         );
         if (typed === null) return;
         if (typed.trim() !== "ลบทั้งคิว") {
@@ -2650,7 +3031,7 @@ async function handleAction(button, options = {}) {
         const message = uncertainCount
           ? `คิวนี้มี ${uncertainCount} รายการที่ต้องตรวจด้วยตนเอง\n\nคุณตรวจ Facebook แล้วว่าไม่มีรายการใดถูกโพสต์จริงใช่ไหม?\n\nเมื่อลบ ระบบจะลบทั้งคิวและหลักฐาน แล้วคุณสามารถเลือกกลุ่มเดิมทั้งหมดเพื่อเริ่มใหม่`
           : "ลบทั้งคิวและหลักฐานของคิวนี้หรือไม่?\n\nDraft รูปต้นฉบับ และคลังกลุ่มจะยังอยู่ คุณสามารถเลือกกลุ่มเดิมทั้งหมดแล้วสร้างคิวใหม่ได้";
-        if (!window.confirm(message)) return;
+        if (!(await uiConfirm(message, { title: "ลบทั้งคิว?", confirmText: "ลบทั้งคิว", tone: "danger" }))) return;
       }
       await api(`/api/runs/${sourceRun.id}`, {
         method: "DELETE",
@@ -2706,8 +3087,9 @@ async function handleAction(button, options = {}) {
       if (!targetIds.length) {
         throw new Error("กรุณาติ๊กอย่างน้อยหนึ่งกลุ่มที่คุณโพสต์เองแล้ว");
       }
-      const accepted = window.confirm(
-        `คุณกด Post ใน Facebook เองและเห็นโพสต์ของทั้ง ${targetIds.length.toLocaleString("th-TH")} กลุ่มแล้วใช่ไหม?\n\nระบบจะไล่เก็บหลักฐานทีละแท็บและจะไม่กด Post ซ้ำ`,
+      const accepted = await uiConfirm(
+        `ระบบจะไล่เก็บหลักฐานทีละแท็บ และจะไม่กด Post ซ้ำ`,
+        { title: `โพสต์เองแล้วครบ ${targetIds.length.toLocaleString("th-TH")} กลุ่ม?`, confirmText: "ใช่ บันทึกทั้งหมด" },
       );
       if (!accepted) return;
       state.bulkMarkPosted = {
@@ -2768,22 +3150,28 @@ async function handleAction(button, options = {}) {
       }
     } else if (action === "target-action") {
       if (button.dataset.value === "confirm") {
-        const accepted = window.confirm(
-          "ตรวจข้อความ รูป และชื่อกลุ่มในแท็บ Facebook แล้วใช่ไหม?\n\nกดตกลงเพื่อให้ระบบคลิกปุ่ม Post จริงในแท็บนี้",
+        const accepted = await uiConfirm(
+          "ตรวจข้อความ รูป และชื่อกลุ่มในแท็บ Facebook แล้ว ระบบจะคลิกปุ่ม Post จริงในแท็บนี้",
+          { title: "ให้ระบบกดโพสต์?", confirmText: "ยืนยันและโพสต์" },
         );
         if (!accepted) return;
       } else if (
         button.dataset.value === "mark-posted" &&
         !options.skipMarkPostedConfirmation
       ) {
-        const accepted = window.confirm(
-          "คุณกด Post ใน Facebook เองและเห็นโพสต์ปรากฏแล้วใช่ไหม?\n\nระบบจะไม่กด Post ซ้ำ แต่จะเก็บหลักฐานและบันทึกว่าเผยแพร่แล้ว",
+        const accepted = await uiConfirm(
+          "ระบบจะไม่กด Post ซ้ำ แต่จะเก็บหลักฐานและบันทึกว่าเผยแพร่แล้ว",
+          { title: "คุณโพสต์เองแล้วใช่ไหม?", confirmText: "ใช่ โพสต์แล้ว" },
         );
         if (!accepted) return;
       }
       const reason =
         button.dataset.value === "skip"
-          ? window.prompt("เหตุผลที่ข้าม (เว้นว่างได้)", "")
+          ? await uiPrompt("ระบบจะแคปหน้าจอเป็นหลักฐานก่อนปิดแท็บ", "", {
+              title: "ข้ามกลุ่มนี้?",
+              confirmText: "ข้าม",
+              placeholder: "เหตุผล (เว้นว่างได้)",
+            })
           : undefined;
       if (button.dataset.value === "skip" && reason === null) return;
       await api(`/api/runs/${button.dataset.run}/targets/${button.dataset.target}/action`, {
@@ -2810,8 +3198,9 @@ async function handleAction(button, options = {}) {
       );
       toast("เปิดแท็บ Facebook ของกลุ่มนี้แล้ว");
     } else if (action === "reconcile-posted") {
-      const accepted = window.confirm(
-        "คุณตรวจแล้วว่าโพสต์นี้เผยแพร่ใน Facebook จริงใช่ไหม?\n\nระบบจะเปิดกลุ่มเพื่อเก็บหลักฐานย้อนหลังและจะไม่กด Post ซ้ำ",
+      const accepted = await uiConfirm(
+        "ระบบจะเปิดกลุ่มเพื่อเก็บหลักฐานย้อนหลัง และจะไม่กด Post ซ้ำ",
+        { title: "โพสต์นี้เผยแพร่ใน Facebook จริง?", confirmText: "ใช่ เผยแพร่แล้ว" },
       );
       if (!accepted) return;
       await api(
@@ -2869,23 +3258,31 @@ groupForm.addEventListener("submit", async (event) => {
   }
 });
 
-const markPostedClickState = new WeakMap();
+// Keyed by the action (not the element): a poll re-render between taps
+// rebuilds the button, and the count must survive that.
+const markPostedClickState = new Map();
 
 function scheduleMarkPostedAction(button, event) {
   event.preventDefault();
-  const previous = markPostedClickState.get(button);
+  const key = actionKey(button);
+  const previous = markPostedClickState.get(key);
   if (previous?.timer) window.clearTimeout(previous.timer);
   const count = (previous?.count || 0) + 1;
   if (count >= 3 || event.detail >= 3) {
-    markPostedClickState.delete(button);
-    void handleAction(button, { skipMarkPostedConfirmation: true });
+    markPostedClickState.delete(key);
+    void runAction(button, { skipMarkPostedConfirmation: true });
     return;
   }
   const timer = window.setTimeout(() => {
-    markPostedClickState.delete(button);
-    void handleAction(button);
+    markPostedClickState.delete(key);
+    // Act on the current button for this target if a re-render replaced it.
+    const current =
+      [...document.querySelectorAll("[data-action=\"target-action\"]")].find(
+        (element) => actionKey(element) === key,
+      ) || button;
+    void runAction(current);
   }, 550);
-  markPostedClickState.set(button, { count, timer });
+  markPostedClickState.set(key, { count, timer });
 }
 
 document.addEventListener("change", (event) => {
@@ -2911,6 +3308,13 @@ document.addEventListener("change", (event) => {
 document.addEventListener("click", (event) => {
   const nav = event.target.closest("[data-route]");
   if (nav) navigate(nav.dataset.route);
+  const mobileNav = event.target.closest("[data-mobile-route]");
+  if (mobileNav) navigate(mobileNav.dataset.mobileRoute);
+  if (event.target.closest("[data-mobile-more]")) {
+    moreSheet.hidden = !moreSheet.hidden;
+    return;
+  }
+  if (event.target.closest("[data-mobile-more-close]")) closeMoreSheet();
   const action = event.target.closest("[data-action]");
   if (
     action?.dataset.action === "target-action" &&
@@ -2919,12 +3323,29 @@ document.addEventListener("click", (event) => {
     scheduleMarkPostedAction(action, event);
     return;
   }
-  if (action) void handleAction(action);
+  if (action) void runAction(action);
 });
 
+// Last time the user touched or clicked anything. A re-render between the
+// press and release of a tap swaps the button out, and the browser then
+// drops the click, so the 3-second poll waits until the user pauses.
+let lastPointerAt = 0;
+document.addEventListener("pointerdown", () => {
+  lastPointerAt = Date.now();
+}, { capture: true });
+
 async function pollAndRender() {
+  // Do not rebuild the page under the user's finger: skip while an action is
+  // running, a dialog is open, a tap is in progress, or a field has focus.
+  if (Date.now() - lastPointerAt < 1500 || markPostedClickState.size) return;
+  const focused = document.activeElement;
+  const typing =
+    app.contains(focused) &&
+    ["INPUT", "SELECT", "TEXTAREA"].includes(focused?.tagName) &&
+    !["checkbox", "radio"].includes(focused?.type);
+  if (busyActions.size || appDialog.open || typing) return;
   try {
-    await refreshAll();
+    await refreshAll({ quiet: true });
     const editingHistoryFilter =
       (state.route === "history" &&
         document.activeElement?.closest?.(".evidence-filter-panel")) ||
@@ -2944,7 +3365,7 @@ async function pollAndRender() {
 }
 
 await refreshAll()
-  .then(() => render())
+  .then(() => navigate(routeFromHash()))
   .catch((error) => {
     app.innerHTML = `<div class="empty-state"><h2>เปิดแอปไม่สำเร็จ</h2><p>${escapeHtml(error.message)}</p></div>`;
   });

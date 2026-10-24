@@ -55,6 +55,16 @@ async function request(url, options = {}) {
 }
 
 const passed = [];
+/** Confirms the in-app dialog (replaces window.confirm/prompt), filling its input when a value is given. */
+async function acceptAppDialog(page, value) {
+  const dialog = page.locator("#appDialog");
+  const confirm = dialog.locator("[data-dialog-confirm]");
+  await confirm.waitFor({ state: "visible" });
+  if (value !== undefined) await dialog.locator(".app-dialog-input").fill(value);
+  await confirm.click();
+  await dialog.waitFor({ state: "hidden" });
+}
+
 async function check(name, task) {
   await task();
   passed.push(name);
@@ -269,10 +279,11 @@ try {
   await check("Groups: clear old Draft queues and restart", async () => {
     await page.locator(".group-check").first().check();
     await page.locator("#runDraft").selectOption(restartDraft.id);
-    page.once("dialog", (dialog) => dialog.accept("เริ่มใหม่ทั้งหมด"));
+    const dialogDone1 = acceptAppDialog(page, "เริ่มใหม่ทั้งหมด");
     await page
       .getByRole("button", { name: "ล้างคิวเดิมทั้งหมดและสร้างใหม่" })
       .click();
+    await dialogDone1;
     await page.getByRole("heading", { name: "คิวและการทำงาน" }).waitFor();
     await page.getByText(/ล้างคิวเดิม 0 คิวแล้ว และสร้างคิวใหม่ 1 กลุ่มสำเร็จ/).waitFor();
     await navigate("groups", "คลังกลุ่ม");
@@ -335,8 +346,9 @@ try {
   });
   await check("Evidence: delete upload", async () => {
     const dialog = page.locator("#evidenceDialog");
-    page.once("dialog", (confirmation) => confirmation.accept());
+    const dialogDone2 = acceptAppDialog(page);
     await dialog.getByRole("button", { name: "ลบ", exact: true }).click();
+    await dialogDone2;
     await page.getByText("ลบหลักฐานแล้ว").waitFor();
     await dialog.getByText("ยังไม่มีหลักฐานสำหรับกลุ่มนี้").waitFor();
   });
@@ -712,10 +724,11 @@ try {
     await bulkCard
       .locator('.target-bulk-check[data-target="mock-bulk-target-2"]')
       .check();
-    page.once("dialog", (dialog) => dialog.accept());
+    const dialogDone3 = acceptAppDialog(page);
     await bulkCard
       .getByRole("button", { name: "ฉันโพสต์เองแล้วที่เลือก (2)" })
       .click();
+    await dialogDone3;
     await page
       .getByText("บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานครบ 2 รายการ")
       .waitFor();
@@ -783,12 +796,13 @@ try {
     }
   });
   await check("Runs: reconcile manually posted interrupted target", async () => {
-    page.once("dialog", (dialog) => dialog.accept());
+    const dialogDone4 = acceptAppDialog(page);
     await page
       .locator(".target-row")
       .filter({ hasText: "Recovery mock group" })
       .getByRole("button", { name: "ยืนยันว่าโพสต์เองแล้ว" })
       .click();
+    await dialogDone4;
     await page
       .getByText("กระทบยอดเป็นเผยแพร่แล้วและเก็บหลักฐานย้อนหลังเรียบร้อย")
       .waitFor();
@@ -810,30 +824,33 @@ try {
     await page.getByText("เปิดแท็บ Facebook ของกลุ่มนี้แล้ว").waitFor();
   });
   await check("Runs: skip target", async () => {
-    page.once("dialog", (dialog) => dialog.accept("ข้ามจากชุดทดสอบ"));
+    const dialogDone5 = acceptAppDialog(page, "ข้ามจากชุดทดสอบ");
     await page
       .locator(".target-row")
       .filter({ hasText: "Seed group" })
       .getByRole("button", { name: "ข้าม + หลักฐาน" })
       .click();
+    await dialogDone5;
     await page.getByText("ข้ามกลุ่มนี้พร้อมเก็บหลักฐานแล้ว").waitFor();
   });
   await check("Runs: confirm target", async () => {
-    page.once("dialog", (dialog) => dialog.accept());
+    const dialogDone6 = acceptAppDialog(page);
     await page
       .locator(".target-row")
       .filter({ hasText: "Second mock group" })
       .getByRole("button", { name: "ยืนยันและโพสต์" })
       .click();
+    await dialogDone6;
     await page.getByText("ระบบกด Post แล้วและกำลังเก็บหลักฐาน").waitFor();
   });
   await check("Runs: record manually posted target", async () => {
-    page.once("dialog", (dialog) => dialog.accept());
+    const dialogDone7 = acceptAppDialog(page);
     await page
       .locator(".target-row")
       .filter({ hasText: "Manual mock group" })
       .getByRole("button", { name: "ฉันโพสต์เองแล้ว" })
       .click();
+    await dialogDone7;
     await page
       .getByText("บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานเรียบร้อย")
       .waitFor();
@@ -904,12 +921,13 @@ try {
   });
   await navigate("runs", "คิวและการทำงาน");
   await check("Runs: delete entire failed queue", async () => {
-    page.once("dialog", (dialog) => dialog.accept());
+    const dialogDone8 = acceptAppDialog(page);
     await page
       .locator(".run-card")
       .filter({ hasText: "Composer was not ready" })
       .getByRole("button", { name: "ลบทั้งคิว" })
       .click();
+    await dialogDone8;
     await page
       .getByText("ลบทั้งคิวแล้ว สามารถเลือกกลุ่มเดิมทั้งหมดและสร้างคิวโพสต์ใหม่ได้")
       .waitFor();
@@ -918,12 +936,13 @@ try {
     }
   });
   await check("Runs: require typed confirmation before deleting posted queue", async () => {
-    page.once("dialog", (dialog) => dialog.accept("ลบทั้งคิว"));
+    const dialogDone9 = acceptAppDialog(page, "ลบทั้งคิว");
     await page
       .locator(".run-card")
       .filter({ hasText: "Recovery mock group" })
       .getByRole("button", { name: "ลบทั้งคิว" })
       .click();
+    await dialogDone9;
     for (let attempt = 0; attempt < 30 && !deletedPostedRunPayload; attempt += 1) {
       await page.waitForTimeout(100);
     }
