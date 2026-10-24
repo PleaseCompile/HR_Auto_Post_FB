@@ -12,6 +12,7 @@ import {
 import {
   getRun,
   markGroupPosted,
+  moveTargetToEnd,
   updateRunStatus,
   updateTarget,
 } from "./db.js";
@@ -52,10 +53,27 @@ interface Controller {
   resolveAction: ((request: ActionRequest) => void) | null;
   prepared: Map<string, PendingPrepared>;
   acting: Set<string>;
+  /** Set when execute() returns, so background loops know to exit. */
+  finished: boolean;
+  /** Auto-confirm: when each prepared tab becomes due for its Post click. */
+  autoDueAt: Map<string, number>;
+  /** Targets moved to the back of the queue while the run is going. */
+  retryQueue: RunTargetRecord[];
+  /** Automatic re-queues per target, capped so a broken group cannot loop. */
+  requeueCounts: Map<string, number>;
 }
 
 const delay = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const randomBetween = (min: number, max: number) =>
+  Math.floor(Math.random() * (Math.max(min, max) - min + 1)) + min;
+
+// A target that failed before the system ever pressed Post is safe to retry:
+// it goes to the back of the queue this many times before being marked failed.
+const MAX_AUTO_REQUEUES = Math.max(0, Number(process.env.HR_AUTO_MAX_AUTO_REQUEUES ?? 1));
+// Never retry automatically when retrying cannot help or could be unsafe.
+const NO_RETRY_CODES = new Set(["SECURITY_CHECKPOINT", "BROWSER_SESSION_CLOSED"]);
 
 const DEFAULT_HYBRID_TAB_LIMIT = 10;
 const DEFAULT_HYBRID_WINDOWS_TAB_LIMIT = 30;
@@ -171,6 +189,10 @@ class RunManager {
       resolveAction: null,
       prepared: new Map(),
       acting: new Set(),
+      finished: false,
+      autoDueAt: new Map(),
+      retryQueue: [],
+      requeueCounts: new Map(),
     };
     this.controllers.set(runId, controller);
     void this.execute(runId, controller);
@@ -215,6 +237,98 @@ class RunManager {
       return;
     }
     await this.settlePrepared(runId, controller, targetId, action, reason);
+  }
+
+  /**
+   * User asked to retry a target later: close its tab (if any) and move it to
+   * the back of the queue. Only for targets the system never pressed Post on
+   * (awaiting confirmation), or ones the user has checked in Facebook.
+   */
+  async requeue(runId: string, targetId: string): Promise<void> {
+    const controller = this.requireController(runId);
+    if (controller.workflow !== "hybrid-tabs") {
+      throw new Error("ย้ายไปท้ายคิวได้เฉพาะคิวแบบ Hybrid");
+    }
+    if (controller.acting.has(targetId)) throw new Error("กลุ่มนี้กำลังกดโพสต์อยู่ ย้ายไม่ได้");
+    if (controller.prepared.has(targetId)) {
+      await this.requeuePrepared(runId, controller, targetId, "ย้ายไปลองใหม่ท้ายคิวตามที่คุณสั่ง");
+      return;
+    }
+    const target = getRun(runId)?.targets?.find((item) => item.id === targetId);
+    if (!target) throw new Error("ไม่พบกลุ่มนี้ในคิว");
+    if (!["manual_action_required", "failed", "skipped"].includes(target.status)) {
+      throw new Error("ย้ายไปท้ายคิวได้เฉพาะกลุ่มที่รอยืนยัน ต้องตรวจ ไม่สำเร็จ หรือข้าม");
+    }
+    this.requeueTarget(controller, target, "ย้ายไปลองใหม่ท้ายคิวตามที่คุณสั่ง");
+  }
+
+  private requeueTarget(
+    controller: Controller,
+    target: RunTargetRecord,
+    message: string,
+  ): void {
+    moveTargetToEnd(target.id);
+    updateTarget(target.id, "queued", { message, evidencePath: null, permalink: null });
+    controller.retryQueue.push({ ...target, status: "queued", message });
+  }
+
+  /** Close a prepared tab the system never posted from, and retry it last. */
+  private async requeuePrepared(
+    runId: string,
+    controller: Controller,
+    targetId: string,
+    message: string,
+  ): Promise<void> {
+    const pending = controller.prepared.get(targetId);
+    if (!pending) return;
+    controller.prepared.delete(targetId);
+    controller.autoDueAt.delete(targetId);
+    await this.closePrepared(controller, pending);
+    this.requeueTarget(controller, pending.target, message);
+    updateRunStatus(runId, controller.prepared.size ? "awaiting_confirmation" : "running");
+  }
+
+  /**
+   * Auto-confirm worker. Replaces one-shot timers, which silently gave up when
+   * they fired during a pause or while the tab was busy and left the tab stuck
+   * at "awaiting confirmation" forever. Posts one tab at a time, in due order,
+   * with a random gap between posts.
+   */
+  private async autoConfirmLoop(runId: string, controller: Controller): Promise<void> {
+    const minGap = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MIN_MS ?? 8_000);
+    let notBefore = 0;
+    while (!controller.stopped && !controller.finished) {
+      await delay(1_000);
+      if (controller.paused || controller.stopped || controller.acting.size) continue;
+      const now = Date.now();
+      if (now < notBefore) continue;
+      const due = [...controller.autoDueAt.entries()]
+        .filter(([targetId, dueAt]) => dueAt <= now && controller.prepared.has(targetId))
+        .sort((left, right) => left[1] - right[1])[0];
+      if (!due) continue;
+      const [targetId] = due;
+      controller.autoDueAt.delete(targetId);
+      try {
+        await this.action(runId, targetId, "confirm");
+      } catch (error) {
+        // The action failed before Post was pressed (the tab is still prepared).
+        if (controller.prepared.has(targetId) && !controller.acting.has(targetId)) {
+          const reason = error instanceof Error ? error.message : "ไม่ทราบสาเหตุ";
+          if (controller.workflow === "hybrid-tabs") {
+            await this.requeuePrepared(
+              runId,
+              controller,
+              targetId,
+              `โพสต์อัตโนมัติไม่สำเร็จ (${reason}) · ย้ายไปลองใหม่ท้ายคิว`,
+            );
+          } else {
+            // Multi-window tabs stay open by design: just try this tab again later.
+            controller.autoDueAt.set(targetId, Date.now() + 30_000);
+          }
+        }
+      }
+      notBefore = Date.now() + randomBetween(minGap, minGap * 2);
+    }
   }
 
   async markPostedBulk(
@@ -625,6 +739,23 @@ class RunManager {
       updateRunStatus(run.id, "awaiting_confirmation");
       return;
     }
+    const attempts = controller.requeueCounts.get(target.id) || 0;
+    if (
+      controller.workflow === "hybrid-tabs" &&
+      !controller.stopped &&
+      !NO_RETRY_CODES.has(classified.code) &&
+      attempts < MAX_AUTO_REQUEUES
+    ) {
+      // Preparation never reaches the Post button, so a retry cannot double-post.
+      controller.requeueCounts.set(target.id, attempts + 1);
+      await page.close().catch(() => undefined);
+      this.requeueTarget(
+        controller,
+        target,
+        `เตรียมโพสต์ไม่สำเร็จ (${message}) · ย้ายไปลองใหม่ท้ายคิว (ครั้งที่ ${attempts + 1}/${MAX_AUTO_REQUEUES})`,
+      );
+      return;
+    }
     updateTarget(target.id, "failed", { message, evidencePath });
     await page.close().catch(() => undefined);
   }
@@ -718,26 +849,11 @@ class RunManager {
       });
       updateRunStatus(run.id, "awaiting_confirmation");
 
-      if (controller.autoConfirm && !controller.paused && !controller.stopped) {
+      if (controller.autoConfirm) {
         const minDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MIN_MS ?? 8_000);
         const maxDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MAX_MS ?? 150_000);
-        const autoDelayMs = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-        setTimeout(() => {
-          if (
-            !controller.paused &&
-            !controller.stopped &&
-            controller.prepared.has(target.id) &&
-            !controller.acting.has(target.id)
-          ) {
-            void this.action(run.id, target.id, "confirm").catch((err) => {
-              const classified = classifyAutomationError(err);
-              if (classified.code === "SECURITY_CHECKPOINT") {
-                controller.paused = true;
-                updateRunStatus(run.id, "paused");
-              }
-            });
-          }
-        }, autoDelayMs);
+        // Picked up by autoConfirmLoop; survives pauses and busy moments.
+        controller.autoDueAt.set(target.id, Date.now() + randomBetween(minDelay, maxDelay));
       }
     } catch (error) {
       await this.recordPreparationFailure(
@@ -771,21 +887,24 @@ class RunManager {
   }
 
   private async executeHybrid(run: RunRecord, controller: Controller): Promise<void> {
-    for (const target of run.targets || []) {
-      if (!["queued", "failed"].includes(target.status) || !target.group) continue;
+    const pending = (run.targets || []).filter(
+      (target) => ["queued", "failed"].includes(target.status) && Boolean(target.group),
+    );
+    // Work through the original order first, then targets moved to the back
+    // (stuck or failed before Post). Keep going until nothing is in flight.
+    while (!controller.stopped) {
+      const target = pending.shift() || controller.retryQueue.shift();
+      if (!target) {
+        if (controller.prepared.size === 0 && controller.acting.size === 0) break;
+        await delay(250);
+        continue;
+      }
       await this.waitForCapacity(controller, target);
       if (controller.stopped) break;
       await this.prepareInNewTab(run, controller, target);
       if (!controller.stopped && PREPARATION_COOLDOWN_MS) {
         await delay(PREPARATION_COOLDOWN_MS);
       }
-    }
-
-    while (
-      !controller.stopped &&
-      (controller.prepared.size > 0 || controller.acting.size > 0)
-    ) {
-      await delay(250);
     }
     if (controller.stopped) {
       for (const targetId of [...controller.prepared.keys()]) {
@@ -850,6 +969,9 @@ class RunManager {
       const run = getRun(runId);
       if (!run?.draft || !run.targets) throw new Error("ข้อมูลคิวไม่ครบ");
 
+      if (controller.autoConfirm && run.mode !== "dry-run") {
+        void this.autoConfirmLoop(runId, controller);
+      }
       if (run.mode === "dry-run") {
         await this.executeDryRun(run, controller);
       } else if (controller.workflow === "hybrid-windows") {
@@ -875,6 +997,7 @@ class RunManager {
         .forEach((target) => updateTarget(target.id, "failed", { message }));
       updateRunStatus(runId, "failed", { finish: true });
     } finally {
+      controller.finished = true;
       this.controllers.delete(runId);
     }
   }

@@ -1067,6 +1067,18 @@ export function updateTarget(
   );
 }
 
+/** Moves a target behind every other target of its run, so it is retried last. */
+export function moveTargetToEnd(id: string): void {
+  db.prepare(
+    `UPDATE run_targets
+     SET position = (
+       SELECT COALESCE(MAX(position), 0) + 1 FROM run_targets
+       WHERE run_id = (SELECT run_id FROM run_targets WHERE id = ?)
+     ), updated_at = ?
+     WHERE id = ?`,
+  ).run(id, new Date().toISOString(), id);
+}
+
 export function markGroupPosted(groupId: string): void {
   db.prepare("UPDATE groups_list SET last_posted_at = ?, updated_at = ? WHERE id = ?").run(
     new Date().toISOString(),

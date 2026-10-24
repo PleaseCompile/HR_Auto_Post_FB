@@ -1747,7 +1747,15 @@ function renderRunCard(run) {
                         <button class="button button-small button-secondary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="mark-posted" title="คลิกปกติจะถามยืนยัน · คลิก 3 ครั้งติดกันเพื่อบันทึกทันที" ${bulkJob ? "disabled" : ""}>ฉันโพสต์เองแล้ว</button>
                         <button class="button button-small button-ghost" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="skip">ข้าม + หลักฐาน</button>
                         <button class="button button-small button-ghost" data-action="focus-target" data-run="${run.id}" data-target="${target.id}">เปิดแท็บ</button>
+                        ${run.workflow === "hybrid-tabs" ? `<button class="button button-small button-ghost" data-action="requeue-target" data-run="${run.id}" data-target="${target.id}" data-value="prepared" title="ปิดแท็บนี้แล้วลองกลุ่มนี้ใหม่หลังกลุ่มอื่น">↻ ไปท้ายคิว</button>` : ""}
                       `
+                      : ""
+                  }
+                  ${
+                    active &&
+                    run.workflow === "hybrid-tabs" &&
+                    ["manual_action_required", "failed"].includes(target.status)
+                      ? `<button class="button button-small button-ghost" data-action="requeue-target" data-run="${run.id}" data-target="${target.id}" data-value="checked" title="ตรวจ Facebook แล้วว่ายังไม่มีโพสต์ ให้ลองใหม่ท้ายคิว">↻ ลองใหม่ท้ายคิว</button>`
                       : ""
                   }
                   ${
@@ -3307,6 +3315,25 @@ async function handleAction(button, options = {}) {
             : `ข้ามกลุ่มนี้พร้อมเก็บหลักฐานแล้ว${keepOpenMessage}`,
       );
       window.setTimeout(pollAndRender, 1000);
+    } else if (action === "requeue-target") {
+      const prepared = button.dataset.value === "prepared";
+      const accepted = await uiConfirm(
+        prepared
+          ? "ระบบยังไม่ได้กดโพสต์ในแท็บนี้ จะปิดแท็บแล้วลองกลุ่มนี้ใหม่หลังจากกลุ่มอื่นเสร็จ ไม่มีโพสต์ซ้ำ"
+          : "ตรวจใน Facebook แล้วว่ากลุ่มนี้ยังไม่มีโพสต์ของคุณ ถ้าโพสต์ไปแล้วจะกลายเป็นโพสต์ซ้ำ",
+        {
+          title: prepared ? "ย้ายกลุ่มนี้ไปท้ายคิว?" : "ลองกลุ่มนี้ใหม่ท้ายคิว?",
+          confirmText: prepared ? "ย้ายไปท้ายคิว" : "ยังไม่ได้โพสต์ ลองใหม่",
+        },
+      );
+      if (!accepted) return;
+      await api(
+        `/api/runs/${button.dataset.run}/targets/${button.dataset.target}/requeue`,
+        { method: "POST" },
+      );
+      await refreshAll();
+      render();
+      toast("ย้ายไปท้ายคิวแล้ว ระบบจะลองใหม่หลังกลุ่มอื่น");
     } else if (action === "focus-target") {
       await api(
         `/api/runs/${button.dataset.run}/targets/${button.dataset.target}/focus`,

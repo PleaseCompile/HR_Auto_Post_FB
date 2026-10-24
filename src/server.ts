@@ -673,6 +673,11 @@ app.post("/api/runs/:runId/targets/:targetId/action", asyncRoute(async (request,
   response.json({ ok: true });
 }));
 
+app.post("/api/runs/:runId/targets/:targetId/requeue", asyncRoute(async (request, response) => {
+  await runManager.requeue(String(request.params.runId), String(request.params.targetId));
+  response.json({ ok: true });
+}));
+
 app.post("/api/runs/:runId/targets/:targetId/focus", asyncRoute(async (request, response) => {
   await runManager.focusTarget(String(request.params.runId), String(request.params.targetId));
   response.json({ ok: true });
