@@ -394,13 +394,28 @@ async function readPendingHeaderCount(page: Page): Promise<number | null> {
  * regularly reads an empty page. This polls until a card, the empty state, or the
  * timeout shows up before anything tries to extract.
  */
-export async function waitForPendingList(
-  page: Page,
-): Promise<"cards" | "empty" | "unknown"> {
+export type PendingListState =
+  | "cards"
+  | "empty"
+  | "membership-pending"
+  | "unavailable"
+  | "unknown";
+
+export async function waitForPendingList(page: Page): Promise<PendingListState> {
   const deadline = Date.now() + PAGE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const seen = await page
       .evaluate(() => {
+        const text = document.body.innerText || "";
+        // Two dead ends taken from the live page, neither of which ever shows a
+        // Delete button: admins have not approved the membership yet (the only
+        // control is "Cancel Request"), or the group is gone or no longer open to us.
+        if (/your review is still pending|การตรวจสอบของคุณยังอยู่ระหว่างดำเนินการ/i.test(text)) {
+          return { cards: 0, empty: false, blocked: "membership-pending" as const };
+        }
+        if (/this content isn't available|เนื้อหานี้ไม่พร้อมใช้งาน/i.test(text)) {
+          return { cards: 0, empty: false, blocked: "unavailable" as const };
+        }
         const clean = (value: string | null | undefined) =>
           (value || "").replace(/\s+/g, " ").trim();
         const cards = Array.from(
@@ -417,9 +432,10 @@ export async function waitForPendingList(
           /no posts to show|no pending posts|nothing to show|ไม่มีโพสต์ที่จะแสดง|ไม่มีโพสต์ที่รอ|ยังไม่มีโพสต์|ไม่มีเนื้อหา/i.test(
             document.body.innerText || "",
           );
-        return { cards, empty };
+        return { cards, empty, blocked: null };
       })
-      .catch(() => ({ cards: 0, empty: false }));
+      .catch(() => ({ cards: 0, empty: false, blocked: null }));
+    if (seen.blocked) return seen.blocked;
     if (seen.cards > 0) return "cards";
     if (seen.empty) return "empty";
     await page.waitForTimeout(600);
@@ -785,10 +801,19 @@ class PendingCleaner {
     return { count: cards.length };
   }
 
-  private async waitForPendingList(
-    page: Page,
-  ): Promise<"cards" | "empty" | "unknown"> {
-    return waitForPendingList(page);
+  private async waitForPendingList(page: Page): Promise<PendingListState> {
+    const state = await waitForPendingList(page);
+    if (state === "membership-pending") {
+      throw new Error(
+        "แอดมินยังไม่อนุมัติการเป็นสมาชิก · Facebook ไม่ให้ลบโพสต์ที่รอตรวจในกลุ่มนี้ (มีแค่ปุ่ม Cancel Request ซึ่งจะยกเลิกคำขอเข้ากลุ่มด้วย)",
+      );
+    }
+    if (state === "unavailable") {
+      throw new Error(
+        "เปิดกลุ่มไม่ได้ (This content isn't available) · อาจออกจากกลุ่ม ถูกนำออก หรือกลุ่มถูกลบไปแล้ว",
+      );
+    }
+    return state;
   }
 
   private async scrollPendingList(page: Page): Promise<void> {
