@@ -444,16 +444,22 @@ async function runAction(button, options) {
   }
 }
 
-async function refreshAll({ quiet = false } = {}) {
+/**
+ * light: only what changes while work is running (queues, status, scans).
+ * The group library (~250 KB for 500 groups), drafts and uploaded evidence
+ * change only when the user edits them, so polls skip them most of the time.
+ */
+async function refreshAll({ quiet = false, light = false } = {}) {
   const request = (url) => api(url, { quiet });
+  const skip = (value) => Promise.resolve(value);
   const [dashboard, drafts, groups, runs, groupScan, manualEvidence, pendingCleanup, system] =
     await Promise.all([
       request("/api/dashboard"),
-      request("/api/drafts"),
-      request("/api/groups"),
+      light ? skip(state.drafts) : request("/api/drafts"),
+      light ? skip(state.groups) : request("/api/groups"),
       request("/api/runs"),
       request("/api/groups/scan"),
-      request("/api/manual-evidence"),
+      light ? skip(state.manualEvidence) : request("/api/manual-evidence"),
       request("/api/pending-cleanup"),
       request("/api/system").catch(() => null),
     ]);
@@ -3428,6 +3434,18 @@ document.addEventListener("pointerdown", () => {
   lastPointerAt = Date.now();
 }, { capture: true });
 
+let pollTick = 0;
+let lastPollSignature = "";
+let lastPollRoute = "";
+
+document.addEventListener("visibilitychange", () => {
+  // Coming back to the app: refresh everything immediately.
+  if (!document.hidden) {
+    pollTick = 9;
+    void pollAndRender();
+  }
+});
+
 async function pollAndRender() {
   // Do not rebuild the page under the user's finger: skip while an action is
   // running, a dialog is open, a tap is in progress, or a field has focus.
@@ -3438,8 +3456,28 @@ async function pollAndRender() {
     ["INPUT", "SELECT", "TEXTAREA"].includes(focused?.tagName) &&
     !["checkbox", "radio"].includes(focused?.type);
   if (busyActions.size || appDialog.open || typing) return;
+  // A phone with the app in the background should not keep pulling data.
+  if (document.hidden) return;
   try {
-    await refreshAll({ quiet: true });
+    pollTick += 1;
+    const scanWasRunning = ["running", "stopping"].includes(state.groupScan?.status);
+    await refreshAll({ quiet: true, light: pollTick % 10 !== 0 });
+    // A finished group scan added groups: fetch the library right away.
+    if (scanWasRunning && !["running", "stopping"].includes(state.groupScan?.status)) {
+      await refreshAll({ quiet: true });
+    }
+    // Rebuilding the page when nothing changed only causes flicker and lost taps.
+    const signature = JSON.stringify([
+      state.dashboard,
+      state.runs,
+      state.groupScan,
+      state.pendingCleanup,
+      state.route === "settings" ? state.system : null,
+      state.route === "history" ? state.manualEvidence : null,
+    ]);
+    if (signature === lastPollSignature && state.route === lastPollRoute) return;
+    lastPollSignature = signature;
+    lastPollRoute = state.route;
     const editingHistoryFilter =
       (state.route === "history" &&
         document.activeElement?.closest?.(".evidence-filter-panel")) ||

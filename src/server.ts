@@ -1,8 +1,9 @@
 import express from "express";
+import compression from "compression";
 import multer from "multer";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { parse as parseCsv } from "csv-parse/sync";
 import { z } from "zod";
 import {
@@ -75,13 +76,62 @@ const evidenceUpload = multer({
   },
 });
 
+// gzip every response: the group list alone is ~250 KB of JSON for 500 groups,
+// which matters on a phone over mobile data or a relayed Tailscale path.
+app.use(compression());
 app.use(express.json({ limit: "2mb" }));
+
+// API reads revalidate with the ETag Express already sends, so an unchanged
+// list comes back as a tiny 304 instead of the full body on every poll.
+app.use("/api", (_request, response, next) => {
+  response.setHeader("Cache-Control", "no-cache");
+  next();
+});
+
+/**
+ * index.html references its scripts and styles with ?v=<hash of their
+ * contents>, recomputed when the files change. Browsers can then cache the
+ * assets for good and still pick up every update without a manual bump.
+ */
+const versionedAssets = ["app.js", "styles.css", "ux.css"];
+let assetVersionCache: { key: string; version: string } | null = null;
+
+function assetVersion(): string {
+  const stats = versionedAssets.map((name) => {
+    const filePath = path.join(publicDirectory, name);
+    return fs.existsSync(filePath) ? `${name}:${fs.statSync(filePath).mtimeMs}` : name;
+  });
+  const key = stats.join("|");
+  if (assetVersionCache?.key !== key) {
+    const hash = createHash("sha1");
+    for (const name of versionedAssets) {
+      const filePath = path.join(publicDirectory, name);
+      if (fs.existsSync(filePath)) hash.update(fs.readFileSync(filePath));
+    }
+    assetVersionCache = { key, version: hash.digest("hex").slice(0, 12) };
+  }
+  return assetVersionCache.version;
+}
+
+function sendIndex(_request: express.Request, response: express.Response) {
+  const html = fs
+    .readFileSync(path.join(publicDirectory, "index.html"), "utf8")
+    .replace(/\?v=[^"']+/g, `?v=${assetVersion()}`);
+  response.setHeader("Cache-Control", "no-cache");
+  response.type("html").send(html);
+}
+
+app.get(["/", "/index.html"], sendIndex);
 app.use(
   express.static(publicDirectory, {
-    setHeaders(response, filePath) {
-      if (/\.(?:html|js|css)$/i.test(filePath)) {
-        response.setHeader("Cache-Control", "no-store, max-age=0");
-      }
+    index: false,
+    setHeaders(response) {
+      // Versioned URLs (?v=hash) never change content; anything else revalidates.
+      const url = (response.req as express.Request | undefined)?.originalUrl || "";
+      response.setHeader(
+        "Cache-Control",
+        url.includes("?v=") ? "public, max-age=31536000, immutable" : "no-cache",
+      );
     },
   }),
 );
@@ -779,10 +829,7 @@ app.use("/api", (_request, response) => {
   });
 });
 
-app.use((_request, response) => {
-  response.setHeader("Cache-Control", "no-store, max-age=0");
-  response.sendFile(path.join(publicDirectory, "index.html"));
-});
+app.use(sendIndex);
 
 app.use(
   (
