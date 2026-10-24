@@ -103,31 +103,150 @@ body {
 .text-attention { color: var(--amber); }
 .text-danger { color: var(--red); }
 
-/* ---- Toasts ---- */
+/* ---- Toasts ----
+   Four kinds, each with its own colour so the outcome reads at a glance:
+   success green, info blue, warning amber, error red. */
+.toast-region {
+  z-index: 80;
+  width: min(420px, calc(100vw - 32px));
+}
+
 .toast {
+  --toast-accent: var(--green);
+  --toast-bg: #ecfdf3;
+  --toast-border: #abefc6;
+  --toast-ink: #054f31;
+  position: relative;
+  min-width: 0;
+  max-width: none;
+  padding: 12px 40px 14px 12px;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  max-width: 420px;
+  gap: 11px;
+  overflow: hidden;
+  border: 1px solid var(--toast-border);
+  border-left: 5px solid var(--toast-accent);
+  border-radius: 12px;
+  color: var(--toast-ink);
+  background: var(--toast-bg);
+  box-shadow: 0 10px 30px rgba(16, 24, 40, 0.18);
   font-size: 13.5px;
   line-height: 1.45;
   cursor: pointer;
+  animation: toast-pop 220ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.toast-info {
+  --toast-accent: var(--blue);
+  --toast-bg: #eff4ff;
+  --toast-border: #b2ccff;
+  --toast-ink: #00359e;
+}
+
+.toast-warning {
+  --toast-accent: #f79009;
+  --toast-bg: #fffaeb;
+  --toast-border: #fedf89;
+  --toast-ink: #7a2e0e;
+}
+
+.toast-error {
+  --toast-accent: var(--red);
+  --toast-bg: #fef3f2;
+  --toast-border: #fecdca;
+  --toast-ink: #7a271a;
 }
 
 .toast-icon {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.18);
-  font-size: 13px;
+  color: #ffffff;
+  background: var(--toast-accent);
+  font-size: 14px;
   font-weight: 800;
 }
 
-.toast.info {
-  background: var(--ink-900);
+.toast-body {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.toast-title {
+  color: var(--toast-accent);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.toast-warning .toast-title {
+  color: #b54708;
+}
+
+.toast-text {
+  color: var(--toast-ink);
+  font-weight: 600;
+}
+
+.toast-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--toast-ink);
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  opacity: 0.55;
+}
+
+.toast-close:hover {
+  opacity: 1;
+  background: rgba(16, 24, 40, 0.06);
+}
+
+/* Shrinking bar: how long until the message goes away. */
+.toast-timer {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 3px;
+  background: var(--toast-accent);
+  opacity: 0.45;
+  transform-origin: left;
+  animation: toast-timer var(--toast-ms, 4500ms) linear forwards;
+}
+
+.toast.is-leaving {
+  animation: toast-out 180ms ease-in forwards;
+}
+
+@keyframes toast-pop {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes toast-out {
+  to { opacity: 0; transform: translateY(6px); }
+}
+
+@keyframes toast-timer {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast,
+  .toast.is-leaving,
+  .toast-timer {
+    animation: none;
+  }
 }
 
 /* ---- In-app confirm / prompt dialog ---- */
@@ -599,9 +718,12 @@ input.toggle:focus-visible {
     font-size: 13px;
   }
 
+  /* Centred above the tab bar; full width on phones, capped on tablets. */
   .toast-region {
-    left: 12px;
-    right: 12px;
+    left: 50%;
+    right: auto;
+    width: min(520px, calc(100vw - 24px));
+    transform: translateX(-50%);
     bottom: calc(74px + env(safe-area-inset-bottom));
   }
 

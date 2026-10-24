@@ -260,19 +260,46 @@ function visualState(status) {
   return "neutral";
 }
 
-const toastIcons = { success: "✓", error: "!", info: "i" };
+/**
+ * Notification kinds. Pick by what happened, not by which code path:
+ *   success  – the thing the user asked for is done (saved, created, posted)
+ *   info     – something started or is in progress, or a neutral fact
+ *   warning  – cancelled, partly done, or needs the user's attention
+ *   error    – it failed
+ */
+const toastKinds = {
+  success: { icon: "✓", title: "สำเร็จ", ms: 4500 },
+  info: { icon: "i", title: "กำลังดำเนินการ", ms: 5000 },
+  warning: { icon: "!", title: "โปรดทราบ", ms: 7000 },
+  error: { icon: "✕", title: "ไม่สำเร็จ", ms: 9000 },
+};
 
 function toast(message, type = "success") {
-  const kind = toastIcons[type] ? type : "success";
+  const kind = toastKinds[type] ? type : "success";
+  const { icon, title, ms } = toastKinds[kind];
   const item = document.createElement("div");
-  item.className = `toast ${kind === "success" ? "" : kind}`;
-  item.setAttribute("role", kind === "error" ? "alert" : "status");
-  item.innerHTML = `<span class="toast-icon" aria-hidden="true">${toastIcons[kind]}</span><span class="toast-text"></span>`;
+  item.className = `toast toast-${kind}`;
+  item.setAttribute("role", kind === "error" || kind === "warning" ? "alert" : "status");
+  item.style.setProperty("--toast-ms", `${ms}ms`);
+  item.innerHTML = `
+    <span class="toast-icon" aria-hidden="true">${icon}</span>
+    <span class="toast-body">
+      <strong class="toast-title">${title}</strong>
+      <span class="toast-text"></span>
+    </span>
+    <button type="button" class="toast-close" aria-label="ปิดข้อความ">×</button>
+    <span class="toast-timer" aria-hidden="true"></span>`;
   item.querySelector(".toast-text").textContent = message;
-  item.addEventListener("click", () => item.remove());
+  const dismiss = () => {
+    item.classList.add("is-leaving");
+    window.setTimeout(() => item.remove(), 180);
+  };
+  item.addEventListener("click", dismiss);
+  // Keep at most 4 on screen; the oldest goes first.
+  while (toastRegion.children.length >= 4) toastRegion.firstElementChild.remove();
   toastRegion.append(item);
-  // Errors stay longer: on a phone the user is often looking away when they land.
-  window.setTimeout(() => item.remove(), kind === "error" ? 9000 : 4500);
+  // Errors and warnings stay longer: on a phone you are often looking away.
+  window.setTimeout(dismiss, ms);
 }
 
 /* ---------- Loading feedback ----------
@@ -2804,7 +2831,10 @@ async function importCsv(event) {
     const result = await api("/api/groups/import", { method: "POST", body });
     await refreshAll();
     render();
-    toast(`นำเข้า ${result.imported} กลุ่ม${result.errors.length ? ` · ผิดพลาด ${result.errors.length} แถว` : ""}`);
+    toast(
+        `นำเข้า ${result.imported} กลุ่ม${result.errors.length ? ` · ผิดพลาด ${result.errors.length} แถว` : ""}`,
+        result.errors.length ? "warning" : "success",
+      );
   } catch (error) {
     toast(error.message, "error");
   }
@@ -2871,20 +2901,20 @@ async function handleAction(button, options = {}) {
       state.pendingExpanded.clear();
       await refreshAll();
       render();
-      toast("เริ่มตรวจหาโพสต์ค้างแล้ว");
+      toast("เริ่มตรวจหาโพสต์ค้างแล้ว", "info");
     } else if (action === "stop-pending-scan") {
       await api("/api/pending-cleanup/scan/stop", { method: "POST" });
       await refreshAll();
       render();
-      toast("จะหยุดหลังตรวจกลุ่มปัจจุบันเสร็จ");
+      toast("จะหยุดหลังตรวจกลุ่มปัจจุบันเสร็จ", "info");
     } else if (action === "stop-pending-delete") {
       await api("/api/pending-cleanup/delete/stop", { method: "POST" });
       await refreshAll();
       render();
-      toast("จะหยุดหลังลบโพสต์ปัจจุบันเสร็จ");
+      toast("จะหยุดหลังลบโพสต์ปัจจุบันเสร็จ", "info");
     } else if (action === "start-pending-delete") {
       if (!document.querySelector("#pendingAck")?.checked) {
-        toast("กรุณาติ๊กยืนยันว่าเข้าใจว่าลบแล้วกู้คืนไม่ได้", "error");
+        toast("กรุณาติ๊กยืนยันว่าเข้าใจว่าลบแล้วกู้คืนไม่ได้", "warning");
         return;
       }
       const selected = [...state.pendingSelected];
@@ -2898,7 +2928,7 @@ async function handleAction(button, options = {}) {
         { title: "ลบโพสต์ที่ค้างรออนุมัติ?", confirmText: "ลบ", tone: "danger", placeholder: "พิมพ์ ลบ" },
       );
       if ((typed || "").trim() !== "ลบ") {
-        toast("ยกเลิกการลบแล้ว");
+        toast("ยกเลิกการลบแล้ว", "warning");
         return;
       }
       await api("/api/pending-cleanup/select", {
@@ -2917,7 +2947,7 @@ async function handleAction(button, options = {}) {
       });
       await refreshAll();
       render();
-      toast("เริ่มลบโพสต์ค้างแล้ว");
+      toast("เริ่มลบโพสต์ค้างแล้ว", "info");
     } else if (action === "delete-media") {
       await api(`/api/media/${button.dataset.id}`, { method: "DELETE" });
       await refreshAll();
@@ -2982,12 +3012,12 @@ async function handleAction(button, options = {}) {
       });
       await refreshAll();
       renderScanDialog();
-      toast("เริ่มสแกนแล้ว ดูความคืบหน้าได้ใน Chromium และหน้าต่างนี้");
+      toast("เริ่มสแกนแล้ว ดูความคืบหน้าได้ใน Chromium และหน้าต่างนี้", "info");
     } else if (action === "stop-scan") {
       await api("/api/groups/scan/stop", { method: "POST" });
       await refreshAll();
       renderScanDialog();
-      toast("ระบบจะหยุดหลังจบรอบปัจจุบันและบันทึกกลุ่มที่พบ");
+      toast("ระบบจะหยุดหลังจบรอบปัจจุบันและบันทึกกลุ่มที่พบ", "info");
     } else if (action === "import-csv") {
       document.querySelector("#csvInput")?.click();
     } else if (action === "scroll-to-run-form") {
@@ -3061,7 +3091,7 @@ async function handleAction(button, options = {}) {
       );
       if (typed === null) return;
       if (typed.trim() !== "เริ่มใหม่ทั้งหมด") {
-        toast("ยกเลิกการเริ่มใหม่ เพราะคำยืนยันไม่ถูกต้อง", "error");
+        toast("ยกเลิกการเริ่มใหม่ เพราะคำยืนยันไม่ถูกต้อง", "warning");
         return;
       }
       if (autoConfirm && mode === "assisted") {
@@ -3147,7 +3177,7 @@ async function handleAction(button, options = {}) {
         );
         if (typed === null) return;
         if (typed.trim() !== "ลบทั้งคิว") {
-          toast("ยกเลิกการลบ เพราะคำยืนยันไม่ถูกต้อง", "error");
+          toast("ยกเลิกการลบ เพราะคำยืนยันไม่ถูกต้อง", "warning");
           return;
         }
         acknowledgedPosted = true;
@@ -3174,6 +3204,7 @@ async function handleAction(button, options = {}) {
         sourceRun?.workflow === "hybrid-windows"
           ? `เริ่มคิวแล้ว ระบบจะแบ่งสูงสุด ${sourceRun.tabLimit || 30} แท็บต่อหน้าต่าง และจะไม่ปิดแท็บเอง`
           : "เริ่มคิวแล้ว ระบบจะเปิดแท็บ Facebook ใหม่ตามรูปแบบของคิว",
+        "info",
       );
       await refreshAll();
       render();
@@ -3199,8 +3230,17 @@ async function handleAction(button, options = {}) {
       await api(`/api/runs/${button.dataset.id}/${endpoint}`, { method: "POST" });
       await refreshAll();
       render();
-      if (action === "stop-run" && sourceRun?.workflow === "hybrid-windows") {
-        toast("หยุดคิวแล้ว แท็บและหน้าต่าง Facebook ยังคงเปิดอยู่ คุณเป็นผู้ปิดเอง");
+      if (action === "stop-run") {
+        toast(
+          sourceRun?.workflow === "hybrid-windows"
+            ? "หยุดคิวแล้ว แท็บและหน้าต่าง Facebook ยังคงเปิดอยู่ คุณเป็นผู้ปิดเอง"
+            : "หยุดคิวแล้ว กดเริ่มคิวเมื่อต้องการทำส่วนที่เหลือต่อ",
+          "warning",
+        );
+      } else if (action === "pause-run") {
+        toast("พักคิวไว้แล้ว ระบบจะไม่เปิดหรือโพสต์กลุ่มใหม่จนกว่าจะกดทำต่อ", "warning");
+      } else {
+        toast("ทำคิวต่อแล้ว", "info");
       }
     } else if (action === "bulk-mark-posted") {
       const runId = button.dataset.run;
@@ -3264,7 +3304,7 @@ async function handleAction(button, options = {}) {
           result.failed
             ? `บันทึกสำเร็จ ${result.succeeded}/${result.total} รายการ · มี ${result.failed} รายการต้องตรวจ`
             : `บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานครบ ${result.succeeded} รายการ`,
-          result.failed ? "error" : "success",
+          result.failed ? "warning" : "success",
         );
       } finally {
         targetIds.forEach((targetId) => state.selectedRunTargets.delete(targetId));
@@ -3313,6 +3353,7 @@ async function handleAction(button, options = {}) {
           : button.dataset.value === "mark-posted"
             ? `${options.skipMarkPostedConfirmation ? "ทางลัด 3 คลิก · " : ""}บันทึกว่าโพสต์เองแล้วและเก็บหลักฐานเรียบร้อย${keepOpenMessage}`
             : `ข้ามกลุ่มนี้พร้อมเก็บหลักฐานแล้ว${keepOpenMessage}`,
+        button.dataset.value === "skip" ? "info" : "success",
       );
       window.setTimeout(pollAndRender, 1000);
     } else if (action === "requeue-target") {
@@ -3333,13 +3374,13 @@ async function handleAction(button, options = {}) {
       );
       await refreshAll();
       render();
-      toast("ย้ายไปท้ายคิวแล้ว ระบบจะลองใหม่หลังกลุ่มอื่น");
+      toast("ย้ายไปท้ายคิวแล้ว ระบบจะลองใหม่หลังกลุ่มอื่น", "info");
     } else if (action === "focus-target") {
       await api(
         `/api/runs/${button.dataset.run}/targets/${button.dataset.target}/focus`,
         { method: "POST" },
       );
-      toast("เปิดแท็บ Facebook ของกลุ่มนี้แล้ว");
+      toast("เปิดแท็บ Facebook ของกลุ่มนี้แล้ว", "info");
     } else if (action === "reconcile-posted") {
       const accepted = await uiConfirm(
         "ระบบจะเปิดกลุ่มเพื่อเก็บหลักฐานย้อนหลัง และจะไม่กด Post ซ้ำ",
@@ -3354,19 +3395,19 @@ async function handleAction(button, options = {}) {
       render();
       toast("กระทบยอดเป็นเผยแพร่แล้วและเก็บหลักฐานย้อนหลังเรียบร้อย");
     } else if (action === "connect-session") {
-      toast("กำลังเปิด Chromium กรุณาล็อกอินในหน้าต่างที่เปิดขึ้น");
+      toast("กำลังเปิด Chromium กรุณาล็อกอินในหน้าต่างที่เปิดขึ้น", "info");
       await api("/api/session/connect", { method: "POST" });
       await refreshAll();
       render();
     } else if (action === "check-session" || action === "refresh") {
       await refreshAll();
       render();
-      toast("อัปเดตสถานะแล้ว");
+      toast("อัปเดตสถานะแล้ว", "info");
     } else if (action === "close-session") {
       await api("/api/session/close", { method: "POST" });
       await refreshAll();
       render();
-      toast("ปิด Browser แล้ว");
+      toast("ปิด Browser แล้ว", "info");
     }
   } catch (error) {
     toast(error.message, "error");
