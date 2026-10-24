@@ -1,12 +1,18 @@
 import http from "node:http";
+import path from "node:path";
 import { chromium } from "playwright";
-import {
+
+// Importing the cleaner opens the database, and opening it marks any sweep still in
+// progress as interrupted — so without its own data folder this test would fail the
+// real app's live run.
+process.env.HR_AUTO_DATA_DIR = path.resolve("test-results", `pending-${Date.now()}`);
+const {
   ageInDays,
   deletePendingCard,
   markPendingCards,
   parsePendingDate,
   waitForPendingList,
-} from "../dist/pending-cleaner.js";
+} = await import("../dist/pending-cleaner.js");
 
 let failures = 0;
 function check(name, condition, detail = "") {
