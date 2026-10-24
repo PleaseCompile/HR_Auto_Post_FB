@@ -61,6 +61,8 @@ interface Controller {
   retryQueue: RunTargetRecord[];
   /** Automatic re-queues per target, capped so a broken group cannot loop. */
   requeueCounts: Map<string, number>;
+  /** Closed tabs whose outcome (retry or manual check) is still being decided. */
+  deciding: number;
 }
 
 const delay = (milliseconds: number) =>
@@ -73,7 +75,10 @@ const randomBetween = (min: number, max: number) =>
 // it goes to the back of the queue this many times before being marked failed.
 const MAX_AUTO_REQUEUES = Math.max(0, Number(process.env.HR_AUTO_MAX_AUTO_REQUEUES ?? 1));
 // Never retry automatically when retrying cannot help or could be unsafe.
-const NO_RETRY_CODES = new Set(["SECURITY_CHECKPOINT", "BROWSER_SESSION_CLOSED"]);
+const NO_RETRY_CODES = new Set(["SECURITY_CHECKPOINT", "PROFILE_LOCKED"]);
+// How long to wait after a tab closes before deciding whether the whole
+// browser went away (its page "close" events arrive before the context's).
+const BROWSER_GONE_CHECK_MS = 1_500;
 
 const DEFAULT_HYBRID_TAB_LIMIT = 10;
 const DEFAULT_HYBRID_WINDOWS_TAB_LIMIT = 30;
@@ -193,6 +198,7 @@ class RunManager {
       autoDueAt: new Map(),
       retryQueue: [],
       requeueCounts: new Map(),
+      deciding: 0,
     };
     this.controllers.set(runId, controller);
     void this.execute(runId, controller);
@@ -520,22 +526,52 @@ class RunManager {
     const pending = controller.prepared.get(targetId);
     if (!pending || controller.acting.has(targetId) || controller.stopped) return;
     controller.prepared.delete(targetId);
+    controller.autoDueAt.delete(targetId);
+    // The system never pressed Post in this tab, so retrying cannot double-post.
+    const retryLater = (message: string): boolean => {
+      const attempts = controller.requeueCounts.get(targetId) || 0;
+      if (controller.workflow !== "hybrid-tabs" || controller.stopped || attempts >= MAX_AUTO_REQUEUES) {
+        return false;
+      }
+      controller.requeueCounts.set(targetId, attempts + 1);
+      this.requeueTarget(controller, pending.target, message);
+      return true;
+    };
+    const settleStatus = () =>
+      updateRunStatus(runId, controller.prepared.size ? "awaiting_confirmation" : "running");
+
     if (kind === "crashed") {
       this.recordPreparationOutcome(controller, false, "RENDERER_CRASHED");
-      updateTarget(targetId, "failed", {
-        message:
-          "[RENDERER_CRASHED] แท็บ Chromium หยุดทำงาน รายการนี้ยังไม่ถูกโพสต์และสามารถลองใหม่ได้",
-      });
-    } else {
-      updateTarget(targetId, "manual_action_required", {
-        message:
-          "[TAB_CLOSED] แท็บถูกปิดก่อนบันทึกผล กรุณาตรวจ Facebook แล้วเลือกยืนยันว่าโพสต์เอง หากโพสต์สำเร็จ",
-      });
+      if (!retryLater("[RENDERER_CRASHED] แท็บหยุดทำงานก่อนกดโพสต์ · ย้ายไปลองใหม่ท้ายคิว")) {
+        updateTarget(targetId, "failed", {
+          message:
+            "[RENDERER_CRASHED] แท็บ Chromium หยุดทำงาน รายการนี้ยังไม่ถูกโพสต์และสามารถลองใหม่ได้",
+        });
+      }
+      settleStatus();
+      return;
     }
-    updateRunStatus(
-      runId,
-      controller.prepared.size ? "awaiting_confirmation" : "running",
-    );
+
+    // One tab closed by the user: they may have posted by hand, so ask them.
+    // The whole browser gone (crash, killed for memory): retry, it relaunches.
+    controller.deciding += 1;
+    setTimeout(() => {
+      controller.deciding -= 1;
+      if (controller.stopped) return;
+      const browserGone = !browserSession.isOpen();
+      if (
+        !browserGone ||
+        !retryLater(
+          "[BROWSER_CLOSED] Browser ปิดตัวกะทันหันก่อนกดโพสต์ (อาจเพราะ RAM เต็ม) · เปิดใหม่และย้ายไปลองใหม่ท้ายคิว",
+        )
+      ) {
+        updateTarget(targetId, "manual_action_required", {
+          message:
+            "[TAB_CLOSED] แท็บถูกปิดก่อนบันทึกผล กรุณาตรวจ Facebook แล้วเลือกยืนยันว่าโพสต์เอง หากโพสต์สำเร็จ",
+        });
+      }
+      settleStatus();
+    }, BROWSER_GONE_CHECK_MS);
   }
 
   private waitForAction(controller: Controller, targetId: string): Promise<ActionRequest> {
@@ -895,7 +931,13 @@ class RunManager {
     while (!controller.stopped) {
       const target = pending.shift() || controller.retryQueue.shift();
       if (!target) {
-        if (controller.prepared.size === 0 && controller.acting.size === 0) break;
+        if (
+          controller.prepared.size === 0 &&
+          controller.acting.size === 0 &&
+          controller.deciding === 0
+        ) {
+          break;
+        }
         await delay(250);
         continue;
       }

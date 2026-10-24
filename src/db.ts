@@ -1067,6 +1067,26 @@ export function updateTarget(
   );
 }
 
+/**
+ * After old screenshots are deleted by the retention job, drop the references
+ * so the UI stops offering "view evidence" links that would 404.
+ */
+export function forgetMissingEvidence(exists: (filePath: string) => boolean): number {
+  let cleared = 0;
+  for (const table of ["run_targets", "pending_cleanup_posts"]) {
+    const rows = db
+      .prepare(`SELECT id, evidence_path FROM ${table} WHERE evidence_path IS NOT NULL`)
+      .all() as Array<{ id: string; evidence_path: string }>;
+    const clear = db.prepare(`UPDATE ${table} SET evidence_path = NULL WHERE id = ?`);
+    for (const row of rows) {
+      if (exists(row.evidence_path)) continue;
+      clear.run(row.id);
+      cleared += 1;
+    }
+  }
+  return cleared;
+}
+
 /** Moves a target behind every other target of its run, so it is retried last. */
 export function moveTargetToEnd(id: string): void {
   db.prepare(

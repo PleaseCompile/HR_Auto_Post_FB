@@ -186,6 +186,9 @@ function windowBatchSummary(total, limit = 30) {
 function recommendedTabLimit(workflow = state.runForm?.workflow) {
   if (workflow === "hybrid-windows") return "30";
   const totalBytes = Number(state.system?.memory?.totalBytes || 0);
+  // ~1.2 GB is used by the OS, services and Chromium with one Facebook tab,
+  // so a 2 GB server has room for about one more.
+  if (totalBytes && totalBytes < 3 * 1024 ** 3) return "2";
   if (totalBytes && totalBytes < 6 * 1024 ** 3) return "4";
   if (totalBytes && totalBytes < 12 * 1024 ** 3) return "8";
   return "10";
@@ -990,7 +993,11 @@ function renderGroups() {
                 <span><b class="step-no">3</b> วิธีเปิดแท็บ</span>
                 <select id="runWorkflow">
                   <option value="hybrid-tabs" ${state.runForm.workflow === "hybrid-tabs" ? "selected" : ""}>Hybrid (แนะนำ) — เติมแท็บต่อเนื่อง</option>
-                  <option value="hybrid-windows" ${state.runForm.workflow === "hybrid-windows" ? "selected" : ""}>หลายหน้าต่าง — ไม่ปิดแท็บเอง</option>
+                  ${
+                    state.system?.smallMemory
+                      ? `<option value="hybrid-windows" disabled>หลายหน้าต่าง — ปิดไว้ (RAM เครื่องนี้น้อย)</option>`
+                      : `<option value="hybrid-windows" ${state.runForm.workflow === "hybrid-windows" ? "selected" : ""}>หลายหน้าต่าง — ไม่ปิดแท็บเอง</option>`
+                  }
                 </select>
               </label>
               <label class="field">
@@ -1717,7 +1724,8 @@ function renderRunCard(run) {
           }
           ${
             run.mode === "assisted" &&
-            ["queued", "interrupted", "stopped"].includes(run.status)
+            ["queued", "interrupted", "stopped"].includes(run.status) &&
+            !(state.system?.smallMemory && run.workflow !== "hybrid-windows")
               ? `<button class="button button-small button-ghost" data-action="switch-workflow" data-id="${run.id}" data-workflow="${run.workflow === "hybrid-windows" ? "hybrid-tabs" : "hybrid-windows"}">${
                   run.workflow === "hybrid-windows" ? "เปลี่ยนเป็น Hybrid" : "เปลี่ยนเป็นหลายหน้าต่าง"
                 }</button>`

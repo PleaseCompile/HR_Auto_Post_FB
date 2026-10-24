@@ -44,8 +44,10 @@ import {
   uploadDirectory,
 } from "./config.js";
 import { browserSession } from "./session.js";
-import { systemStatus } from "./system-status.js";
+import { assertWorkflowFitsMachine, systemStatus } from "./system-status.js";
 import { authEnabled, readAudit, registerAuth } from "./auth.js";
+import { startOomGuard } from "./oom-guard.js";
+import { lastRetention, retentionSettings, startRetention } from "./retention.js";
 import { runManager } from "./run-manager.js";
 import type { GroupRecord } from "./types.js";
 import { groupScanner } from "./group-scanner.js";
@@ -244,7 +246,11 @@ app.get("/api/health", (_request, response) => {
 });
 
 app.get("/api/system", (_request, response) => {
-  response.json({ ...systemStatus(), authEnabled });
+  response.json({
+    ...systemStatus(),
+    authEnabled,
+    retention: { days: retentionSettings.days, minFreeDiskMb: retentionSettings.minFreeDiskBytes / 1024 / 1024, last: lastRetention },
+  });
 });
 
 app.get("/api/audit", (request, response) => {
@@ -560,6 +566,7 @@ app.post("/api/runs", (request, response) => {
     })
     .parse(request.body);
   if (!getDraft(input.draftId)) return response.status(404).json({ error: "ไม่พบ Draft" });
+  assertWorkflowFitsMachine(input.workflow);
   response.status(201).json(createRun(input));
 });
 
@@ -576,6 +583,7 @@ app.post("/api/runs/restart-draft", (request, response) => {
       acknowledgedPosted: z.boolean(),
     })
     .parse(request.body);
+  assertWorkflowFitsMachine(input.workflow);
   if (!getDraft(input.draftId)) {
     return response.status(404).json({ error: "ไม่พบ Draft" });
   }
@@ -629,6 +637,7 @@ app.post("/api/runs/:id/workflow", (request, response) => {
       tabLimit: z.number().int().min(0).max(250).default(0),
     })
     .parse(request.body);
+  assertWorkflowFitsMachine(input.workflow);
   const run = updateRunWorkflow(
     String(request.params.id),
     input.workflow,
@@ -862,6 +871,9 @@ app.use(
     response.status(400).json({ error: message });
   },
 );
+
+startOomGuard();
+startRetention();
 
 const server = app.listen(port, "127.0.0.1", () => {
   console.log(`HR Auto พร้อมใช้งานที่ http://127.0.0.1:${port}`);

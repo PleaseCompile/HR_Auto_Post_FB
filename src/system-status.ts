@@ -37,6 +37,22 @@ export function availableMemoryBytes(): number {
   return os.freemem();
 }
 
+/**
+ * Below 3 GB of RAM (e.g. a 2 GB VPS) only a couple of Facebook tabs fit, and
+ * the multi-window workflow, which never closes its tabs, would run the
+ * machine out of memory.
+ */
+export const SMALL_MEMORY_BYTES = 3 * 1024 ** 3;
+export const isSmallMemoryServer = () => os.totalmem() < SMALL_MEMORY_BYTES;
+
+export function assertWorkflowFitsMachine(workflow: string | undefined): void {
+  if (workflow === "hybrid-windows" && isSmallMemoryServer()) {
+    throw new Error(
+      "เครื่องนี้ RAM น้อยกว่า 3 GB ใช้โหมดหลายหน้าต่างไม่ได้ (แท็บไม่ปิดเอง RAM จะเต็ม) กรุณาใช้ Hybrid",
+    );
+  }
+}
+
 export function hasMemoryPressure(): boolean {
   const available = availableMemoryBytes();
   const total = os.totalmem();
@@ -71,6 +87,7 @@ export function systemStatus() {
     },
     memoryGuard,
     disk,
+    smallMemory: isSmallMemoryServer(),
     display: process.env.DISPLAY || null,
     headless: process.env.HR_AUTO_HEADLESS === "true",
     remoteViewUrl:
