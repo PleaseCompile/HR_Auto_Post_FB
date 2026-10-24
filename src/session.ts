@@ -213,13 +213,19 @@ class BrowserSessionManager {
     this.lastError = null;
     this.logEvent("session_launching", { profile: browserProfileDirectory });
     const headless = process.env.HR_AUTO_HEADLESS === "true";
+    // Server deployments pass extra flags (e.g. --window-size) without a code change.
+    const extraArgs = (process.env.HR_AUTO_BROWSER_ARGS || "")
+      .split(/\s+/)
+      .filter(Boolean);
     try {
       this.context = await chromium.launchPersistentContext(browserProfileDirectory, {
         headless,
         viewport: null,
-        args: headless
-          ? ["--disable-notifications"]
-          : ["--start-maximized", "--disable-notifications"],
+        args: [
+          ...(headless ? [] : ["--start-maximized"]),
+          "--disable-notifications",
+          ...extraArgs,
+        ],
         locale: process.env.HR_AUTO_LOCALE || "th-TH",
       });
     } catch (error) {

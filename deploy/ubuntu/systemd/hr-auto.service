@@ -1,0 +1,21 @@
+[Unit]
+Description=HR Auto server edition
+Wants=hr-auto-display.service hr-auto-wm.service hr-auto-vnc.service hr-auto-novnc.service
+After=network-online.target hr-auto-display.service hr-auto-wm.service
+
+[Service]
+User=hrauto
+WorkingDirectory=/opt/hr-auto
+EnvironmentFile=/etc/hr-auto/hr-auto.env
+Environment=DISPLAY=:99
+Environment=HR_AUTO_DATA_DIR=/var/lib/hr-auto
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/hr-auto/browsers
+ExecStart=/usr/bin/node dist/server.js
+# SIGTERM lets the app close Chromium cleanly so cookies are flushed to disk.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

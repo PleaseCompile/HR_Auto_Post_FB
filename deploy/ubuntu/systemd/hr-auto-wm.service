@@ -1,0 +1,15 @@
+[Unit]
+Description=HR Auto window manager (openbox on :99)
+Requires=hr-auto-display.service
+After=hr-auto-display.service
+
+[Service]
+User=hrauto
+Environment=DISPLAY=:99
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/bin/openbox
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

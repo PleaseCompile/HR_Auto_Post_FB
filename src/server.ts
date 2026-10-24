@@ -43,6 +43,7 @@ import {
   uploadDirectory,
 } from "./config.js";
 import { browserSession } from "./session.js";
+import { systemStatus } from "./system-status.js";
 import { runManager } from "./run-manager.js";
 import type { GroupRecord } from "./types.js";
 import { groupScanner } from "./group-scanner.js";
@@ -173,8 +174,23 @@ function deleteEvidenceFiles(storedPaths: string[]): number {
   return deleted;
 }
 
+const appVersion = (() => {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"),
+    ) as { version?: string };
+    return pkg.version || "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
+
 app.get("/api/health", (_request, response) => {
-  response.json({ ok: true, version: "0.1.0", dataDirectory });
+  response.json({ ok: true, version: appVersion, edition: "server", dataDirectory });
+});
+
+app.get("/api/system", (_request, response) => {
+  response.json(systemStatus());
 });
 
 app.get("/api/dashboard", asyncRoute(async (_request, response) => {

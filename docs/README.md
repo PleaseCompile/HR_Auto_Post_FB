@@ -40,6 +40,7 @@
 | ไฟล์ | เนื้อหา | สถานะ |
 |---|---|---|
 | [UPDATE-GUIDE-TH.md](UPDATE-GUIDE-TH.md) | ขั้นตอนอัปเดตระบบ เช็กลิสต์ และสิ่งที่เปลี่ยน | ใช้ได้ปัจจุบัน |
+| [SERVER-EDITION-TH.md](SERVER-EDITION-TH.md) | Server Edition: รันบน Ubuntu/VPS สั่งจากมือถือ การออกแบบ วิธีทดสอบใน VM และขึ้น VPS | ทดลอง |
 | [FACEBOOK-SESSION-EXPLAINED-TH.md](FACEBOOK-SESSION-EXPLAINED-TH.md) | Session Facebook เก็บที่ไหน ไฟล์ไหน ทำไมไม่ต้องล็อกอินซ้ำ และทำไมย้ายเครื่องแล้วต้องล็อกอินใหม่ | ใช้ได้ปัจจุบัน |
 | [INSTALL-SETUP-EXE-TH.md](INSTALL-SETUP-EXE-TH.md) | ติดตั้งจากไฟล์ Setup.exe สำหรับผู้ใช้ทั่วไป | ใช้ได้ปัจจุบัน |
 | [BUILD-INSTALLER-TH.md](BUILD-INSTALLER-TH.md) | สร้างไฟล์ Setup.exe เพื่อแจกจ่าย | ใช้ได้ปัจจุบัน |

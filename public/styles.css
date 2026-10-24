@@ -2331,3 +2331,167 @@ textarea:focus {
 .pending-danger .scan-consent {
   margin: 14px 20px 0;
 }
+
+.session-detail strong.text-danger {
+  color: var(--red);
+}
+
+/* Phone layout (server edition): the desktop build pins body to 960px, which
+   forces pinch-zoom on a phone. Below 760px the sidebar becomes a scrolling
+   top bar and every multi-column grid collapses to one column. */
+@media (max-width: 760px) {
+  body {
+    min-width: 0;
+  }
+
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    z-index: 30;
+    height: auto;
+    padding: 8px 10px;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    overflow-x: auto;
+    border-right: 0;
+    scrollbar-width: none;
+  }
+
+  .brand {
+    padding: 0 4px 0 0;
+    flex: 0 0 auto;
+  }
+
+  .brand > div:last-child,
+  .privacy-note {
+    display: none;
+  }
+
+  .brand-mark {
+    width: 32px;
+    height: 32px;
+    font-size: 16px;
+  }
+
+  .main-nav,
+  .sidebar-bottom {
+    margin: 0;
+    display: flex;
+    gap: 4px;
+    flex: 0 0 auto;
+  }
+
+  .nav-item {
+    width: auto;
+    padding: 9px 11px;
+    gap: 6px;
+    white-space: nowrap;
+  }
+
+  .topbar {
+    height: auto;
+    padding: 12px 14px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .topbar h1 {
+    font-size: 20px;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .page-content {
+    padding: 14px;
+  }
+
+  .page-header,
+  .toolbar,
+  .toolbar-start,
+  .toolbar-end,
+  .run-actions {
+    flex-wrap: wrap;
+  }
+
+  .dashboard-grid,
+  .compose-layout,
+  .form-grid,
+  .settings-grid,
+  .run-summary,
+  .run-bulk-bar,
+  .evidence-grid,
+  .evidence-card,
+  .evidence-filter-grid,
+  .evidence-upload-form,
+  .scan-scope,
+  .scan-metrics,
+  .pending-scope-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .run-actions {
+    justify-content: flex-start;
+  }
+
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .media-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .target-row {
+    grid-template-columns: 22px 26px minmax(0, 1fr);
+  }
+
+  .target-row > :nth-child(n + 4) {
+    grid-column: 1 / -1;
+  }
+
+  .target-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .data-table-wrap {
+    overflow-x: auto;
+  }
+
+  .data-table {
+    min-width: 640px;
+  }
+
+  .session-detail div {
+    flex-wrap: wrap;
+    gap: 2px 12px;
+  }
+
+  .modal,
+  .scan-modal,
+  .evidence-modal {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
+  }
+
+  .modal-card {
+    padding: 16px;
+    max-height: calc(100vh - 20px);
+    overflow-y: auto;
+  }
+
+  .modal-actions {
+    flex-wrap: wrap;
+  }
+
+  /* Bigger touch targets for the controls used most from a phone. */
+  .button {
+    min-height: 40px;
+  }
+}

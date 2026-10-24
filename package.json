@@ -1,6 +1,6 @@
 {
   "name": "hr-auto",
-  "version": "0.1.0",
+  "version": "0.2.0-server",
   "private": true,
   "description": "Local assisted Facebook group posting workspace for HR teams.",
   "type": "module",
@@ -11,8 +11,10 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
+    "start:server": "node --env-file-if-exists=.env dist/server.js",
+    "test:system": "node tests/system-status.mjs",
     "check": "tsc --noEmit",
-    "test:smoke": "node tests/facebook-composer.mjs && node tests/hybrid-run.mjs && node tests/windowed-run.mjs && node tests/pending-cleanup.mjs && node tests/run-deletion.mjs && node tests/group-scan-extraction.mjs && node tests/api-smoke.mjs && node tests/ui-smoke.mjs && node tests/button-audit.mjs",
+    "test:smoke": "node tests/facebook-composer.mjs && node tests/hybrid-run.mjs && node tests/windowed-run.mjs && node tests/pending-cleanup.mjs && node tests/run-deletion.mjs && node tests/group-scan-extraction.mjs && node tests/api-smoke.mjs && node tests/system-status.mjs && node tests/ui-smoke.mjs && node tests/button-audit.mjs",
     "test:window-session": "node tests/window-session.mjs",
     "reset:queue-evidence": "node scripts/reset-queue-evidence.mjs",
     "install-browser": "playwright install chromium"

@@ -1,6 +1,6 @@
-import os from "node:os";
 import type { Page } from "playwright";
 import { browserSession } from "./session.js";
+import { availableMemoryBytes, hasMemoryPressure } from "./system-status.js";
 import {
   captureEvidence,
   inspectGroup,
@@ -63,8 +63,6 @@ const DEFAULT_HYBRID_WINDOWS_TAB_LIMIT = 30;
 // hard-capped at 30 tabs/window for manual reviewability, not RAM — that cap is
 // now just this workflow's default, adjustable the same way as Hybrid tabs.
 const MAX_HYBRID_TABS_LIMIT = Number(process.env.HR_AUTO_MAX_HYBRID_TABS_LIMIT || 250);
-const MIN_AVAILABLE_MEMORY_BYTES = 4 * 1024 * 1024 * 1024;
-const MIN_AVAILABLE_MEMORY_RATIO = 0.12;
 const PREPARATION_COOLDOWN_MS = Math.max(
   0,
   Number(process.env.HR_AUTO_PREPARE_DELAY_MS ?? 1_000),
@@ -342,12 +340,7 @@ class RunManager {
     ) {
       return false;
     }
-    const free = os.freemem();
-    const total = os.totalmem();
-    return (
-      free < MIN_AVAILABLE_MEMORY_BYTES ||
-      (total > 0 && free / total < MIN_AVAILABLE_MEMORY_RATIO)
-    );
+    return hasMemoryPressure();
   }
 
   private async waitForCapacity(
@@ -364,7 +357,7 @@ class RunManager {
       controller.pressurePaused = memoryPressure;
       if (memoryPressure && target && !pressureMessageWritten) {
         updateTarget(target.id, "queued", {
-          message: `พักการเปิดแท็บใหม่ชั่วคราว · RAM ว่าง ${readableMemory(os.freemem())} · รอให้คุณจัดการแท็บที่เปิดอยู่`,
+          message: `พักการเปิดแท็บใหม่ชั่วคราว · RAM ว่าง ${readableMemory(availableMemoryBytes())} · รอให้คุณจัดการแท็บที่เปิดอยู่`,
         });
         pressureMessageWritten = true;
       }

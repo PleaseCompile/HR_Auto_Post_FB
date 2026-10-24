@@ -1,0 +1,236 @@
+# HR Auto Server Edition (รันบน Ubuntu / VPS แล้วสั่งจากมือถือ)
+
+[ศูนย์รวมเอกสาร](README.md) · [Session Facebook ทำงานยังไง](FACEBOOK-SESSION-EXPLAINED-TH.md) · [ความปลอดภัย](SECURITY-TH.md)
+
+> **สถานะ: ทดลอง (branch `server-edition`, เวอร์ชัน `0.2.0-server`)**
+> แยกจากเวอร์ชัน Windows ที่ใช้งานจริงอยู่ (`main`) โดยสิ้นเชิง ให้ทดสอบใน VM ให้ผ่านก่อนค่อยขึ้น VPS
+
+---
+
+## 1. เป้าหมาย
+
+- มีเครื่อง Ubuntu หนึ่งเครื่อง (VM หรือ VPS) เปิด HR Auto ทิ้งไว้ตลอด
+- สั่งงานจาก **มือถือ** ได้จากทุกที่ เช่น ตอนออกไปกินข้าวก็กดเริ่มคิวรอบเที่ยงได้
+- โพสต์รอบละประมาณ 50 กลุ่ม วันละ 3 รอบ (เช้า กลางวัน เย็น)
+- **ไม่กระทบเวอร์ชัน Windows เดิม** ทั้งโค้ดและข้อมูล
+
+## 2. ทำไมเอาเวอร์ชันเดิมไปรันบนเซิร์ฟเวอร์ตรง ๆ ไม่ได้
+
+| ปัญหาในเวอร์ชันเดิม | ผลบนเซิร์ฟเวอร์ | แก้ในเวอร์ชันนี้ |
+|---|---|---|
+| ตัวกันแรมหยุดเปิดแท็บเมื่อ RAM ว่างต่ำกว่า **4 GB** (ฝังในโค้ด) | VPS 2–4 GB มี RAM ว่างไม่ถึง 4 GB ตลอด → คิว **ค้างพักตลอดกาล** | ปรับได้ด้วย `HR_AUTO_MIN_FREE_MEMORY_MB` / `HR_AUTO_MIN_FREE_MEMORY_RATIO` (ไม่ตั้ง = 4 GB เหมือนเดิม) |
+| บน Linux อ่าน RAM ว่างจาก `os.freemem()` | อาจนับแคชของระบบเป็น "ใช้แล้ว" ทำให้ดูเหมือนแรมเต็มทั้งที่ยังว่าง | อ่าน `MemAvailable` จาก `/proc/meminfo` ตรง ๆ |
+| Chromium ต้องมีหน้าจอ | VPS ไม่มีจอ เปิด Chromium ไม่ขึ้น | จอเสมือน **Xvfb** + ตัวจัดหน้าต่าง **openbox** |
+| ล็อกอิน Facebook / แก้ Checkpoint ต้องทำในหน้าต่าง Chromium | มองไม่เห็นหน้าต่างบนเซิร์ฟเวอร์ | **noVNC** ดูและกดหน้าจอ Browser ผ่านเว็บ (มือถือก็ได้) |
+| หน้าเว็บบังคับกว้างขั้นต่ำ 960px | ใช้บนมือถือต้องซูมไปมา | เพิ่มเลย์เอาต์มือถือ (ต่ำกว่า 760px เมนูเป็นแถบเลื่อนด้านบน การ์ดเรียงแถวเดียว) |
+| แอปรับเฉพาะ `127.0.0.1` และไม่มีระบบล็อกอิน | เปิดออกเน็ตตรง ๆ = ใครก็สั่งโพสต์ด้วยบัญชีคุณได้ | **ไม่เปิดออกเน็ต** ใช้ SSH tunnel หรือ **Tailscale** (เฉพาะอุปกรณ์ของคุณ) |
+| ต้องเปิดหน้าต่าง PowerShell ค้างไว้ | ปิด SSH แล้วโปรแกรมตาย | รันเป็น **systemd service** เปิดเองตอนบูต ล่มแล้วรีสตาร์ทเอง |
+| ไม่มีฟอนต์ไทยใน Ubuntu Server | หน้า Facebook และภาพหลักฐานเป็นสี่เหลี่ยม | ลง `fonts-thai-tlwg` + Noto |
+
+## 3. ภาพรวมสถาปัตยกรรม
+
+```text
+ มือถือ / คอม (ที่ไหนก็ได้)
+   │  Tailscale (เข้ารหัส เฉพาะอุปกรณ์ในบัญชีคุณ)  หรือ  SSH tunnel
+   ▼
+┌──────────────────────────── Ubuntu (VM / VPS) ────────────────────────────┐
+│                                                                            │
+│  tailscale serve :443  ──►  HR Auto (node, 127.0.0.1:4173)  ← hr-auto      │
+│                                  │ Playwright                              │
+│                                  ▼                                         │
+│                             Chromium (headed)                              │
+│                                  │ วาดบน                                    │
+│                                  ▼                                         │
+│                     Xvfb :99 (จอเสมือน 1366x900) + openbox                  │
+│                                  │                                         │
+│  tailscale serve :8443 ──►  noVNC/websockify (127.0.0.1:6080)              │
+│                                  └─► x11vnc (127.0.0.1:5900, มีรหัสผ่าน)     │
+│                                                                            │
+│  ข้อมูล: /var/lib/hr-auto (chmod 700)   โปรแกรม: /opt/hr-auto               │
+│  ตั้งค่า: /etc/hr-auto/hr-auto.env                                           │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+ทุกพอร์ตฟังแค่ `127.0.0.1` ไม่มีพอร์ตไหนเปิดออกอินเทอร์เน็ตโดยตรง
+
+### ทำไมใช้ Chromium แบบมีหน้าจอ (headed) ไม่ใช้ headless
+
+- Facebook ตรวจจับ browser แบบ headless ได้ง่ายกว่า เสี่ยงโดน Checkpoint มากขึ้น
+- ต้องมีหน้าจอให้คุณล็อกอิน ทำ 2FA และแก้ Checkpoint เองอยู่แล้ว
+- พฤติกรรมเหมือนเวอร์ชัน Windows ที่ทดสอบมาแล้วมากที่สุด
+- ค่าใช้จ่ายเพิ่มน้อย Xvfb + x11vnc + noVNC ใช้ RAM รวมประมาณ 50–100 MB
+
+## 4. สิ่งที่เปลี่ยนในโค้ด (เทียบกับ `main`)
+
+| ไฟล์ | เปลี่ยนอะไร | กระทบ Windows ไหม |
+|---|---|---|
+| `src/system-status.ts` (ใหม่) | อ่าน RAM ที่ใช้ได้จริง, เกณฑ์กันแรมจาก env, ข้อมูลสถานะเครื่อง | ไม่ (ค่าเริ่มต้น 4 GB / 12% เท่าเดิม) |
+| `src/run-manager.ts` | ใช้ตัวกันแรมจาก `system-status.ts` | ไม่ |
+| `src/session.ts` | รับ argument เพิ่มให้ Chromium จาก `HR_AUTO_BROWSER_ARGS` | ไม่ (ไม่ตั้ง = เหมือนเดิม) |
+| `src/server.ts` | `GET /api/system`, `/api/health` บอก `version`/`edition` จาก `package.json` | ไม่ |
+| `public/app.js` | การ์ด "เครื่องที่รัน HR Auto" ในหน้าตั้งค่า + ปุ่ม "ดูหน้าจอ Browser" | เพิ่มการ์ดเท่านั้น |
+| `public/styles.css` | เลย์เอาต์มือถือ (`max-width: 760px`) | ไม่ (หน้าจอคอมไม่ถึงเกณฑ์) |
+| `package.json` | เวอร์ชัน `0.2.0-server`, สคริปต์ `start:server`, `test:system` | ไม่ |
+| `deploy/ubuntu/` (ใหม่) | `install.sh`, systemd services, `tailscale-setup.sh`, `doctor.sh` | ไม่ |
+| `tests/system-status.mjs` (ใหม่) | ทดสอบค่าเริ่มต้นและการตั้งค่าตัวกันแรม | — |
+
+## 5. ตัวแปรใหม่
+
+| ตัวแปร | ค่าเริ่มต้น (ไม่ตั้ง) | ค่าในไฟล์ตัวอย่างของเซิร์ฟเวอร์ | หน้าที่ |
+|---|---|---|---|
+| `HR_AUTO_MIN_FREE_MEMORY_MB` | `4096` | `600` | พักเปิดแท็บใหม่เมื่อ RAM ที่ใช้ได้ต่ำกว่าค่านี้ (MB) |
+| `HR_AUTO_MIN_FREE_MEMORY_RATIO` | `0.12` | `0.10` | พักเปิดแท็บใหม่เมื่อ RAM ที่ใช้ได้ต่ำกว่าสัดส่วนนี้ของ RAM ทั้งหมด |
+| `HR_AUTO_BROWSER_ARGS` | ว่าง | `--window-size=1366,900` | argument เพิ่มให้ Chromium คั่นด้วยช่องว่าง |
+| `HR_AUTO_REMOTE_VIEW_URL` | `http://{host}:6080/vnc.html?...` เมื่อมี `DISPLAY` | ตั้งโดย `tailscale-setup.sh` | ลิงก์ของปุ่ม "ดูหน้าจอ Browser" `{host}` = ชื่อโฮสต์ที่ใช้เปิด HR Auto |
+
+ค่าที่ใส่ผิด (ไม่ใช่ตัวเลข หรือติดลบ) จะกลับไปใช้ค่าปลอดภัย 4 GB / 12% ไม่ได้ปิดตัวกันแรม
+
+---
+
+## 6. ทดสอบใน VM (VMware, Ubuntu)
+
+VM ของคุณ: RAM 4 GB, 2 CPU, ดิสก์ 20 GB, Network แบบ NAT ใกล้เคียงแพ็กเกจ SSD2 (590 บาท) ใช้ทดสอบได้พอดี
+
+### 6.1 เตรียม VM
+
+1. เปิด VM แล้วเข้า Terminal
+2. เช็กพื้นที่ว่าง ต้องเหลืออย่างน้อย ~4 GB:
+   ```bash
+   df -h /
+   ```
+3. ถ้ายังไม่มี git:
+   ```bash
+   sudo apt update && sudo apt install -y git
+   ```
+
+### 6.2 ติดตั้ง
+
+```bash
+git clone -b server-edition https://github.com/PleaseCompile/HR_Auto_Post_FB.git
+cd HR_Auto_Post_FB
+sudo bash deploy/ubuntu/install.sh
+```
+
+ใช้เวลาประมาณ 5–15 นาที (โหลด Node.js, Chromium และแพ็กเกจระบบ) จบแล้วจะขึ้น ✅ พร้อมวิธีเข้าใช้งาน
+
+### 6.3 เข้าใช้งานจากเครื่อง Windows (ผ่าน SSH tunnel)
+
+ใน VM ดู IP:
+
+```bash
+hostname -I
+```
+
+บน Windows เปิด PowerShell (ใช้พอร์ต 14173 เพราะ HR Auto ตัวเดิมบน Windows ใช้ 4173 อยู่):
+
+```powershell
+ssh -N -L 14173:127.0.0.1:4173 -L 6080:127.0.0.1:6080 <ชื่อผู้ใช้ใน VM>@<IP ของ VM>
+```
+
+เปิดหน้าต่างนี้ค้างไว้ แล้วเปิดเบราว์เซอร์บน Windows:
+
+- HR Auto: <http://127.0.0.1:14173>
+- หน้าจอ Browser (noVNC): <http://127.0.0.1:6080/vnc.html?autoconnect=1&resize=scale>
+  รหัสผ่าน: ใน VM รัน `sudo cat /etc/hr-auto/vnc-password.txt`
+
+### 6.4 ล็อกอิน Facebook ครั้งแรก
+
+1. เปิดหน้า noVNC ทิ้งไว้แท็บหนึ่ง
+2. ใน HR Auto ไป `ตั้งค่าและ Session` → กด `เชื่อมต่อ Facebook`
+3. หน้าต่าง Chromium จะโผล่ในหน้า noVNC → ล็อกอินและทำ 2FA ในนั้น
+4. กลับไปหน้า HR Auto กด `ตรวจ Session` ต้องขึ้น "พร้อมใช้งาน"
+
+> โปรไฟล์ Facebook จาก Windows **ก๊อปมาใช้ไม่ได้** (DPAPI ดู [FACEBOOK-SESSION-EXPLAINED-TH.md](FACEBOOK-SESSION-EXPLAINED-TH.md)) ต้องล็อกอินใหม่บนเครื่องนี้
+
+### 6.5 ทดสอบจากมือถือ (Tailscale)
+
+```bash
+sudo bash deploy/ubuntu/tailscale-setup.sh
+```
+
+1. เปิดลิงก์ที่ขึ้นมาเพื่อล็อกอิน Tailscale (สมัครฟรีด้วยบัญชี Google ได้)
+2. ลงแอป Tailscale บนมือถือ ล็อกอินบัญชีเดียวกัน
+3. เปิดลิงก์ `https://<ชื่อเครื่อง>.<tailnet>.ts.net/` ที่สคริปต์พิมพ์ให้
+4. ถ้าเปิดไม่ได้: ใน Tailscale admin console → DNS → เปิด **MagicDNS** และ **HTTPS Certificates**
+
+### 6.6 เช็กลิสต์ทดสอบ (ทำตามลำดับ)
+
+| # | ทดสอบ | ผลที่ต้องได้ |
+|---|---|---|
+| 1 | `sudo bash deploy/ubuntu/doctor.sh` | service ทั้ง 5 ตัว ✔, มีฟอนต์ไทย, พบ Chromium |
+| 2 | หน้า `ตั้งค่าและ Session` | การ์ด "เครื่องที่รัน HR Auto" แสดง RAM ~3.x GB, Browser = จอเสมือน :99 |
+| 3 | ล็อกอิน Facebook ผ่าน noVNC | Authentication: พร้อมใช้งาน |
+| 4 | ฟอนต์ไทยในหน้า Facebook (ดูผ่าน noVNC) | อ่านภาษาไทยได้ ไม่เป็นสี่เหลี่ยม |
+| 5 | Dry run 3–5 กลุ่ม | ทุกกลุ่ม "พบพื้นที่สร้างโพสต์" |
+| 6 | คิว Hybrid **3 แท็บ** ไม่เปิด Auto-confirm, 3–5 กลุ่มทดสอบ | เปิดแท็บเตรียมโพสต์ได้ กดยืนยันจากหน้าเว็บได้ |
+| 7 | ทำข้อ 6 อีกครั้งแบบเปิด **Auto-confirm** | โพสต์เองครบ ไม่ค้าง "พักการเปิดแท็บใหม่" |
+| 8 | `sudo systemctl restart hr-auto` แล้วกดเชื่อมต่อใหม่ | ยังล็อกอินอยู่ ไม่ต้องล็อกอินซ้ำ |
+| 9 | `sudo reboot` | หลังบูต service ขึ้นเองครบ ยังล็อกอินอยู่ |
+| 10 | สั่งงานจากมือถือผ่าน Tailscale | ใช้ได้ทุกหน้า ไม่ต้องซูม |
+| 11 | คิวจริง 50 กลุ่ม Hybrid 3–4 แท็บ + Auto-confirm แล้วดู `free -h` ระหว่างรัน | ไม่มีแท็บ crash, RAM ไม่ติดเพดาน |
+
+จดผลข้อ 11 ไว้ (เวลาที่ใช้ทั้งรอบ, RAM ต่ำสุด) ใช้ตัดสินใจเลือกแพ็กเกจ VPS
+
+---
+
+## 7. ขึ้น VPS จริง
+
+ขั้นตอนเหมือนข้อ 6.2–6.5 ทุกอย่าง แค่ทำบน VPS (เลือก Ubuntu 24.04 หรือ 22.04)
+
+ข้อแนะนำแพ็กเกจ (เมื่อโพสต์รอบละ ~50 กลุ่ม):
+
+| แพ็กเกจ | เหมาะไหม |
+|---|---|
+| SSD1 · 2 GB / 1 vCore | ไม่แนะนำ ได้แค่ 1–2 แท็บ ต้องพึ่ง swap ช้าและเสี่ยงแท็บ crash |
+| **SSD2 · 4 GB / 2 vCore** | **แนะนำ** ตั้งคิว 3–4 แท็บ (ตรงกับ VM ที่ทดสอบ) |
+| SSD3 · 8 GB / 4 vCore | เกินจำเป็น เว้นแต่อยากเปิด 8–10 แท็บพร้อมกัน |
+
+ข้อควรรู้บน VPS:
+
+- **ล็อกอินจาก IP ของ Data Center** Facebook มักขอยืนยันตัวตนครั้งแรก ทำผ่าน noVNC ด้วยตัวเอง และอย่าใช้หลายบัญชีบนเครื่องเดียว
+- **Firewall:** แนะนำเปิดแค่ SSH ไม่ต้องเปิดพอร์ต 4173/6080 (Tailscale ไม่ต้องเปิดพอร์ตขาเข้า)
+  ```bash
+  sudo ufw allow OpenSSH && sudo ufw enable
+  ```
+- โฟลเดอร์ `/var/lib/hr-auto/browser-profile` บน Linux **ไม่ได้เข้ารหัสแบบ DPAPI** ป้องกันด้วยสิทธิ์ไฟล์ (`chmod 700`) เท่านั้น ห้ามให้คนอื่นมีสิทธิ์ root บนเครื่องนี้
+
+## 8. อัปเดตโปรแกรม
+
+**หยุดคิวที่กำลังรันก่อนเสมอ** เพราะการติดตั้งจะรีสตาร์ท HR Auto
+
+```bash
+cd HR_Auto_Post_FB
+git pull
+sudo bash deploy/ubuntu/install.sh
+```
+
+`install.sh` ไม่ลบข้อมูลใน `/var/lib/hr-auto` และไม่เขียนทับ `/etc/hr-auto/hr-auto.env`
+
+## 9. คำสั่งที่ใช้บ่อย
+
+```bash
+sudo bash deploy/ubuntu/doctor.sh          # ตรวจสุขภาพทั้งระบบ
+sudo systemctl restart hr-auto             # รีสตาร์ทโปรแกรม (ข้อมูลและล็อกอินยังอยู่)
+journalctl -u hr-auto -f                   # ดู log สด
+sudo nano /etc/hr-auto/hr-auto.env         # แก้ค่าตั้งค่า แล้ว restart
+sudo cat /etc/hr-auto/vnc-password.txt     # ดูรหัส noVNC
+free -h                                    # ดู RAM
+```
+
+## 10. ถอนการติดตั้ง
+
+```bash
+sudo systemctl disable --now hr-auto hr-auto-novnc hr-auto-vnc hr-auto-wm hr-auto-display
+sudo rm /etc/systemd/system/hr-auto*.service && sudo systemctl daemon-reload
+sudo rm -rf /opt/hr-auto
+# ข้อมูลและ Session Facebook (สำรองก่อนถ้ายังต้องใช้):
+# sudo rm -rf /var/lib/hr-auto /etc/hr-auto
+```
+
+## 11. ข้อจำกัดที่รู้อยู่แล้ว
+
+- ถ้า HR Auto รีสตาร์ทกลางคิว (อัปเดต, เครื่องรีบูต, โปรแกรมล่ม) คิวจะเปลี่ยนเป็นสถานะ `interrupted` และกลุ่มที่กำลังเตรียมหรือกำลังส่งอยู่ตอนนั้นจะเป็น "ต้องตรวจเอง" (`manual_action_required`) ระบบจงใจไม่วิ่งต่อเอง ให้ตรวจใน Facebook ก่อนว่ากลุ่มเหล่านั้นโพสต์ไปแล้วหรือยัง แล้วค่อยกดทำต่อ เพื่อกันโพสต์ซ้ำ
+- โหมด **หลายหน้าต่าง** ไม่ปิดแท็บเอง ไม่เหมาะกับเครื่อง RAM 4 GB ให้ใช้ **Hybrid** 3–4 แท็บ
+- ยังไม่มีระบบแจ้งเตือนเข้ามือถือ (เช่น คิวพักเพราะเจอ Checkpoint) ต้องเปิดหน้าเว็บดูเอง
+- ยังไม่มีระบบตั้งเวลาให้คิวเริ่มเอง ต้องกดเริ่มจากมือถือ
+- ยังไม่ได้ทดสอบบนเครื่องจริง ผลทดสอบใน VM ของคุณคือการยืนยันครั้งแรก

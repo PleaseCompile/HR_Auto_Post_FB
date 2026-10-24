@@ -265,7 +265,7 @@ async function api(url, options = {}) {
 }
 
 async function refreshAll() {
-  const [dashboard, drafts, groups, runs, groupScan, manualEvidence, pendingCleanup] =
+  const [dashboard, drafts, groups, runs, groupScan, manualEvidence, pendingCleanup, system] =
     await Promise.all([
       api("/api/dashboard"),
       api("/api/drafts"),
@@ -274,7 +274,9 @@ async function refreshAll() {
       api("/api/groups/scan"),
       api("/api/manual-evidence"),
       api("/api/pending-cleanup"),
+      api("/api/system").catch(() => null),
     ]);
+  state.system = system;
   state.dashboard = dashboard;
   state.drafts = drafts;
   state.groups = groups;
@@ -1930,6 +1932,68 @@ function renderHistory() {
   `;
 }
 
+function formatGigabytes(bytes) {
+  return `${(Number(bytes || 0) / 1024 ** 3).toFixed(1)} GB`;
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds || 0)));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (days) return `${days} วัน ${hours} ชม.`;
+  if (hours) return `${hours} ชม. ${minutes} นาที`;
+  return `${minutes} นาที`;
+}
+
+function remoteViewHref(template) {
+  if (!template) return null;
+  return template.replaceAll("{host}", window.location.hostname);
+}
+
+function renderServerCard() {
+  const system = state.system;
+  if (!system) return "";
+  const memory = system.memory || {};
+  const guard = system.memoryGuard || {};
+  const available = Number(memory.availableBytes || 0);
+  const total = Number(memory.totalBytes || 0);
+  const lowMemory =
+    available < Number(guard.minFreeBytes || 0) ||
+    (total > 0 && available / total < Number(guard.minFreeRatio || 0));
+  const remoteHref = remoteViewHref(system.remoteViewUrl);
+  const browserMode = system.headless
+    ? "Headless (มองไม่เห็นหน้าจอ)"
+    : system.display
+      ? `จอเสมือน ${escapeHtml(system.display)}`
+      : "หน้าต่างปกติของเครื่องนี้";
+  return `
+    <section class="panel settings-card">
+      <h3>เครื่องที่รัน HR Auto</h3>
+      <p>สถานะเครื่อง ใช้ดูว่าเปิดแท็บเพิ่มได้อีกไหมเวลาสั่งงานจากมือถือ</p>
+      <div class="session-detail">
+        <div><span>เครื่อง</span><strong>${escapeHtml(system.hostname || "—")} · ${escapeHtml(system.platform || "")}</strong></div>
+        <div><span>RAM ใช้ได้</span><strong class="${lowMemory ? "text-danger" : ""}">${formatGigabytes(available)} / ${formatGigabytes(total)}</strong></div>
+        <div><span>พักเปิดแท็บเมื่อ RAM ต่ำกว่า</span><strong>${formatGigabytes(guard.minFreeBytes)} หรือ ${Math.round(Number(guard.minFreeRatio || 0) * 100)}%</strong></div>
+        <div><span>CPU / Load</span><strong>${Number(system.cpuCount || 0)} core · ${(system.loadAverage || [0]).map((value) => Number(value).toFixed(2)).join(" / ")}</strong></div>
+        <div><span>ดิสก์ว่าง</span><strong>${system.disk ? `${formatGigabytes(system.disk.freeBytes)} / ${formatGigabytes(system.disk.totalBytes)}` : "—"}</strong></div>
+        <div><span>Browser</span><strong>${browserMode}</strong></div>
+        <div><span>โปรแกรมทำงานมา</span><strong>${formatDuration(system.appUptimeSeconds)}</strong></div>
+      </div>
+      ${
+        lowMemory
+          ? `<div class="status-callout warning" style="margin:14px 0"><div>!</div><div><strong>RAM ต่ำกว่าเกณฑ์</strong><span>คิวจะพักการเปิดแท็บใหม่จนกว่าแท็บเดิมจะถูกจัดการ ลองลดจำนวนแท็บของคิว</span></div></div>`
+          : ""
+      }
+      ${
+        remoteHref
+          ? `<div class="toolbar-start"><a class="button button-ghost" href="${escapeHtml(remoteHref)}" target="_blank" rel="noopener">ดูหน้าจอ Browser (ล็อกอิน / แก้ Checkpoint)</a></div>`
+          : ""
+      }
+    </section>
+  `;
+}
+
 function renderSettings() {
   const session = state.dashboard?.session || {};
   return `
@@ -1960,6 +2024,7 @@ function renderSettings() {
           ${session.browserOpen ? `<button class="button button-ghost" data-action="check-session">ตรวจ Session</button><button class="button button-danger" data-action="close-session">ปิด Browser</button>` : ""}
         </div>
       </section>
+      ${renderServerCard()}
       <section class="panel settings-card">
         <h3>ค่าเริ่มต้นด้านความปลอดภัย</h3>
         <p>รุ่น MVP ล็อกค่าเหล่านี้ไว้เพื่อป้องกันการโพสต์โดยไม่ตั้งใจ และลดความเสียหายเมื่อหน้าจอ Facebook เปลี่ยน</p>
