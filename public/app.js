@@ -2419,9 +2419,17 @@ function bindComposeEvents() {
     preview.textContent = text.value || "ข้อความที่กรอกจะแสดงตรงนี้…";
     preview.classList.toggle("preview-placeholder", !text.value);
   });
-  document.querySelector("#draftImages")?.addEventListener("change", (event) => {
-    state.pendingFiles = [...event.target.files].slice(0, 10);
+  document.querySelector("#draftImages")?.addEventListener("change", async (event) => {
+    const picked = [...event.target.files].slice(0, 10);
+    if (!picked.length) return;
+    const before = picked.reduce((total, file) => total + file.size, 0);
+    toast(`กำลังย่อรูป ${picked.length} รูป…`, "info");
+    state.pendingFiles = await Promise.all(picked.map(compressImage));
+    const after = state.pendingFiles.reduce((total, file) => total + file.size, 0);
     renderPendingImages();
+    if (after < before * 0.9) {
+      toast(`ย่อรูปแล้ว ${formatBytes(before)} → ${formatBytes(after)} อัปโหลดเร็วขึ้น`);
+    }
   });
   document.querySelector("#draftForm")?.addEventListener("submit", saveDraft);
 }
@@ -2442,10 +2450,79 @@ function renderPendingImages() {
   });
 }
 
+/* ---------- Image upload ----------
+   Phone photos are often 3-8 MB. Facebook scales posts to 2048px anyway, so
+   shrinking before upload keeps the same quality on Facebook while sending
+   roughly a tenth of the data, which matters over mobile data and Tailscale. */
+const MAX_IMAGE_EDGE = 2048;
+const IMAGE_QUALITY = 0.85;
+
+function formatBytes(bytes) {
+  return bytes >= 1024 ** 2 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+async function compressImage(file) {
+  // GIFs may be animated; small files are not worth re-encoding.
+  if (!/^image\/(jpeg|png|webp)$/.test(file.type) || file.size < 400 * 1024) return file;
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+    const width = Math.round(bitmap.width * scale);
+    const height = Math.round(bitmap.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#ffffff"; // JPEG has no transparency
+    context.fillRect(0, 0, width, height);
+    context.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close?.();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", IMAGE_QUALITY));
+    if (!blob || blob.size >= file.size) return file;
+    const name = file.name.replace(/\.[^.]+$/, "") + ".jpg";
+    return new File([blob], name, { type: "image/jpeg", lastModified: Date.now() });
+  } catch {
+    return file; // Unsupported format or decode failure: send the original.
+  }
+}
+
+/** POST a FormData body, reporting upload progress (fetch cannot). */
+function uploadWithProgress(url, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.responseType = "json";
+    xhr.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable) onProgress?.(event.loaded / event.total);
+    });
+    xhr.addEventListener("load", () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.response);
+      else reject(new Error(xhr.response?.error || `อัปโหลดไม่สำเร็จ (${xhr.status})`));
+    });
+    xhr.addEventListener("error", () =>
+      reject(new Error("อัปโหลดรูปไม่สำเร็จ ตรวจอินเทอร์เน็ตหรือ Tailscale แล้วลองใหม่")),
+    );
+    trackRequest(1);
+    xhr.addEventListener("loadend", () => trackRequest(-1));
+    xhr.send(formData);
+  });
+}
+
 async function saveDraft(event) {
   event.preventDefault();
   const submitter = event.submitter;
-  const data = Object.fromEntries(new FormData(event.currentTarget));
+  const form = event.currentTarget;
+  const data = Object.fromEntries(new FormData(form));
+  const buttons = [...form.querySelectorAll("button[type=submit], button:not([type])")];
+  const labels = buttons.map((button) => button.textContent);
+  const setBusy = (text) => {
+    buttons.forEach((button) => {
+      button.disabled = true;
+      button.classList.toggle("is-loading", button === submitter);
+    });
+    if (submitter && text) submitter.textContent = text;
+  };
+  setBusy("กำลังบันทึก…");
   try {
     const draft = state.editingDraftId
       ? await api(`/api/drafts/${state.editingDraftId}`, {
@@ -2459,7 +2536,11 @@ async function saveDraft(event) {
     if (state.pendingFiles.length) {
       const media = new FormData();
       state.pendingFiles.forEach((file) => media.append("images", file));
-      await api(`/api/drafts/${draft.id}/media`, { method: "POST", body: media });
+      const total = formatBytes(state.pendingFiles.reduce((sum, file) => sum + file.size, 0));
+      setBusy(`อัปโหลดรูป 0% · ${total}`);
+      await uploadWithProgress(`/api/drafts/${draft.id}/media`, media, (fraction) => {
+        setBusy(`อัปโหลดรูป ${Math.round(fraction * 100)}% · ${total}`);
+      });
     }
     state.pendingFiles = [];
     state.editingDraftId = draft.id;
@@ -2469,6 +2550,12 @@ async function saveDraft(event) {
     else render();
   } catch (error) {
     toast(error.message, "error");
+    // The form is still on screen: give the buttons back so the user can retry.
+    buttons.forEach((button, index) => {
+      button.disabled = false;
+      button.classList.remove("is-loading");
+      button.textContent = labels[index];
+    });
   }
 }
 
