@@ -36,7 +36,27 @@ interface ScanOptions {
   groupIds: string[];
   deleteMode: PendingDeleteMode;
   olderThanDays: number;
+  tabs?: number;
 }
+
+/**
+ * Every tab acts as the same Facebook account, so more tabs multiply how fast that one
+ * account deletes. Ten is the ceiling; the UI recommends three.
+ */
+export const MAX_PENDING_TABS = 10;
+
+export function clampPendingTabs(value: unknown): number {
+  const number = Math.round(Number(value));
+  if (!Number.isFinite(number)) return 1;
+  return Math.min(MAX_PENDING_TABS, Math.max(1, number));
+}
+
+const DEFAULT_PENDING_TABS = clampPendingTabs(process.env.HR_AUTO_PENDING_TABS ?? 3);
+// Tabs open a few seconds apart so they do not all hit Facebook in the same instant.
+const TAB_STAGGER_MS = Math.max(
+  0,
+  Number(process.env.HR_AUTO_PENDING_TAB_STAGGER_MS ?? 2_000),
+);
 
 const SCAN_DELAY_MS = Math.max(
   0,
@@ -525,6 +545,7 @@ class PendingCleaner {
   private current: PendingCleanupState =
     getLatestPendingCleanupRun() || this.emptyState();
   private stopRequested = false;
+  private tabs = DEFAULT_PENDING_TABS;
 
   private emptyState(): PendingCleanupState {
     return {
@@ -556,7 +577,7 @@ class PendingCleaner {
     // sweep and survives a restart, so the in-memory copy is only a fallback for
     // the very first run when no cleanup exists yet.
     const stored = getLatestPendingCleanupRun() || this.current;
-    const state: PendingCleanupState = { ...stored };
+    const state: PendingCleanupState = { ...stored, tabs: this.tabs };
     if (withGroups && state.id) {
       state.groups = listPendingCleanupGroups(state.id, {
         withPosts: true,
@@ -606,6 +627,7 @@ class PendingCleaner {
     );
     this.current = created;
     this.stopRequested = false;
+    this.tabs = clampPendingTabs(options.tabs ?? DEFAULT_PENDING_TABS);
     void this.executeScan();
     return this.status();
   }
@@ -636,6 +658,7 @@ class PendingCleaner {
     deleteMode: PendingDeleteMode;
     olderThanDays: number;
     acknowledged: true;
+    tabs?: number;
   }): Promise<PendingCleanupState> {
     if (this.isBusy()) throw new Error("การล้าง Pending กำลังทำงานอยู่แล้ว");
     if (!this.current.id) throw new Error("ยังไม่มีผลการตรวจ กรุณาตรวจหาโพสต์ค้างก่อน");
@@ -662,6 +685,7 @@ class PendingCleaner {
       error: null,
     });
     this.stopRequested = false;
+    this.tabs = clampPendingTabs(input.tabs ?? DEFAULT_PENDING_TABS);
     void this.executeDelete(selected);
     return this.status();
   }
@@ -673,19 +697,65 @@ class PendingCleaner {
     if (refreshed && refreshed.id === this.current.id) this.current = refreshed;
   }
 
+  /**
+   * Works through `items` with up to `this.tabs` pages at once, each pulling the next
+   * item when it finishes its last. `work` handles a group's own failures; anything it
+   * throws (a security checkpoint, a closed browser) stops every tab and is rethrown.
+   */
+  private async runWithTabs<T>(
+    items: T[],
+    work: (page: Page, item: T, tab: number) => Promise<void>,
+  ): Promise<void> {
+    const count = Math.max(1, Math.min(this.tabs, items.length));
+    const pages: Page[] = [];
+    let next = 0;
+    let fatal: { error: unknown } | null = null;
+    const worker = async (slot: number) => {
+      if (slot && TAB_STAGGER_MS) await delay(slot * TAB_STAGGER_MS);
+      if (fatal || this.stopRequested || next >= items.length) return;
+      // A separate window per tab keeps each one visible: Facebook loads the pending
+      // list lazily, and a hidden background tab can stall that.
+      const page =
+        count === 1 ? await browserSession.newPage() : await browserSession.newWindow();
+      pages.push(page);
+      while (!fatal && !this.stopRequested && next < items.length) {
+        const item = items[next] as T;
+        next += 1;
+        await work(page, item, slot + 1);
+      }
+    };
+    try {
+      await Promise.all(
+        Array.from({ length: count }, (_, slot) =>
+          worker(slot).catch((error: unknown) => {
+            fatal ??= { error };
+            // Also cuts short the groups other tabs are in the middle of: after a
+            // checkpoint the account should stop acting at once, not finish a group.
+            this.stopRequested = true;
+          }),
+        ),
+      );
+    } finally {
+      await Promise.all(pages.map((page) => page.close().catch(() => undefined)));
+    }
+    if (fatal) throw (fatal as { error: unknown }).error;
+  }
+
+  private tabLabel(tab: number): string {
+    return this.tabs > 1 ? `แท็บ ${tab} · ` : "";
+  }
+
   private async executeScan(): Promise<void> {
     const cleanupId = this.current.id!;
-    const page = await browserSession.newPage();
     let scanned = 0;
     let withPending = 0;
     let found = 0;
     try {
       const groups = listPendingCleanupGroups(cleanupId);
-      for (const group of groups) {
-        if (this.stopRequested) break;
+      await this.runWithTabs(groups, async (page, group, tab) => {
         updatePendingCleanupGroup(group.id, {
           status: "scanning",
-          message: "กำลังเปิดหน้าโพสต์ที่รออนุมัติ",
+          message: `${this.tabLabel(tab)}กำลังเปิดหน้าโพสต์ที่รออนุมัติ`,
         });
         try {
           const result = await this.scanGroup(page, group);
@@ -717,7 +787,7 @@ class PendingCleaner {
           pendingFound: found,
         });
         if (!this.stopRequested && SCAN_DELAY_MS) await delay(SCAN_DELAY_MS);
-      }
+      });
 
       const finishedAt = new Date().toISOString();
       const snapshotPath = this.writeSnapshot(cleanupId, "scan");
@@ -738,7 +808,6 @@ class PendingCleaner {
           error instanceof Error ? error.message : "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ",
       });
     } finally {
-      await page.close().catch(() => undefined);
       this.stopRequested = false;
     }
   }
@@ -849,17 +918,15 @@ class PendingCleaner {
     selected: PendingCleanupGroupRecord[],
   ): Promise<void> {
     const cleanupId = this.current.id!;
-    const page = await browserSession.newPage();
     let groupsDone = 0;
     let deleted = 0;
     let failed = 0;
     let skipped = 0;
     try {
-      for (const group of selected) {
-        if (this.stopRequested) break;
+      await this.runWithTabs(selected, async (page, group, tab) => {
         updatePendingCleanupGroup(group.id, {
           status: "deleting",
-          message: "กำลังเปิดหน้าเพื่อลบโพสต์ค้าง",
+          message: `${this.tabLabel(tab)}กำลังเปิดหน้าเพื่อลบโพสต์ค้าง`,
         });
         try {
           const result = await this.deleteGroupPending(page, group);
@@ -889,7 +956,7 @@ class PendingCleaner {
           failedCount: failed,
           skippedCount: skipped,
         });
-      }
+      });
 
       const snapshotPath = this.writeSnapshot(cleanupId, "delete");
       this.patch({
@@ -913,7 +980,6 @@ class PendingCleaner {
           error instanceof Error ? error.message : "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ",
       });
     } finally {
-      await page.close().catch(() => undefined);
       this.stopRequested = false;
     }
   }

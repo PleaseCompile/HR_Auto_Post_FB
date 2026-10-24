@@ -1,3 +1,13 @@
+function readPendingTabs() {
+  try {
+    const saved = Number(localStorage.getItem("hrauto.pendingTabs"));
+    if (Number.isInteger(saved) && saved >= 1 && saved <= 10) return saved;
+  } catch {
+    // Storage can be blocked; the default below is fine.
+  }
+  return 3;
+}
+
 const state = {
   route: "dashboard",
   dashboard: null,
@@ -10,6 +20,7 @@ const state = {
   pendingScope: "known-pending",
   pendingCustomSearch: "",
   pendingCustomSelected: new Set(),
+  pendingTabs: readPendingTabs(),
   pendingSelected: new Set(),
   pendingSelectionInitFor: null,
   pendingExpanded: new Set(),
@@ -902,7 +913,7 @@ function renderPendingSetup(cleanup, sessionReady) {
         : scope === "all"
           ? counts.all
           : state.pendingCustomSelected.size;
-  const minutes = Math.max(1, Math.round((scopeCount * 8) / 60));
+  const minutes = Math.max(1, Math.round((scopeCount * 8) / 60 / state.pendingTabs));
 
   return `
     <section class="panel pending-setup">
@@ -970,13 +981,44 @@ function renderPendingSetup(cleanup, sessionReady) {
             ? `จะเปิดตรวจ ${scopeCount.toLocaleString("th-TH")} กลุ่ม · ใช้เวลาประมาณ ${minutes} นาที`
             : "ยังไม่มีกลุ่มในขอบเขตนี้"
         }</span>
+        ${renderPendingTabsPicker(false)}
         <button class="button button-primary" data-action="start-pending-scan" ${
           sessionReady && scopeCount ? "" : "disabled"
         }>เริ่มตรวจหาโพสต์ค้าง</button>
       </div>
+      ${renderPendingTabsWarning()}
       ${sessionReady ? "" : `<p class="muted">ต้องเชื่อมต่อและล็อกอิน Facebook ก่อนจึงจะเริ่มตรวจได้</p>`}
     </section>
   `;
+}
+
+// Every tab is the same Facebook account, so more tabs mean faster deletes from one
+// account; past five the picker says so.
+function renderPendingTabsPicker(disabled) {
+  const options = [
+    [1, "1 แท็บ (ช้าสุด ปลอดภัยสุด)"],
+    [2, "พร้อมกัน 2 แท็บ"],
+    [3, "พร้อมกัน 3 แท็บ (แนะนำ)"],
+    [5, "พร้อมกัน 5 แท็บ"],
+    [8, "พร้อมกัน 8 แท็บ (เสี่ยง)"],
+    [10, "พร้อมกัน 10 แท็บ (เสี่ยงสุด)"],
+  ];
+  return `
+    <select class="pending-tabs" data-pending-tabs aria-label="จำนวนแท็บพร้อมกัน" ${disabled ? "disabled" : ""}>
+      ${options
+        .map(
+          ([value, label]) =>
+            `<option value="${value}" ${state.pendingTabs === value ? "selected" : ""}>${label}</option>`,
+        )
+        .join("")}
+    </select>
+  `;
+}
+
+function renderPendingTabsWarning() {
+  return state.pendingTabs > 5
+    ? `<p class="pending-tabs-warning">เกิน 5 แท็บ Facebook อาจมองว่าบัญชีทำงานเร็วผิดปกติและขึ้นหน้าตรวจความปลอดภัย ระบบจะหยุดทุกแท็บทันทีถ้าเจอ</p>`
+    : "";
 }
 
 function renderPendingProgress(cleanup, mode) {
@@ -988,7 +1030,9 @@ function renderPendingProgress(cleanup, mode) {
     <section class="panel pending-progress">
       <div class="panel-head">
         <div>
-          <h3>${scanning ? "กำลังตรวจหาโพสต์ค้าง" : "กำลังลบโพสต์ค้าง"}</h3>
+          <h3>${scanning ? "กำลังตรวจหาโพสต์ค้าง" : "กำลังลบโพสต์ค้าง"}${
+            cleanup.tabs > 1 ? ` · ${cleanup.tabs} แท็บพร้อมกัน` : ""
+          }</h3>
           <p class="muted">${escapeHtml(cleanup.message)}</p>
         </div>
         <button class="button button-danger" data-action="${
@@ -1151,10 +1195,12 @@ function renderPendingResults(cleanup, sessionReady) {
       </label>
       <div class="pending-actions">
         ${cleanup.snapshotPath ? `<a class="button button-ghost" href="/api/pending-cleanup/snapshot">ดาวน์โหลด JSON</a>` : ""}
+        ${renderPendingTabsPicker(deleting)}
         <button class="button button-danger" data-action="start-pending-delete" ${
           sessionReady && selectedGroups.length && !deleting ? "" : "disabled"
         }>เริ่มลบ (สูงสุด ${selectedPosts.toLocaleString("th-TH")} โพสต์)</button>
       </div>
+      ${renderPendingTabsWarning()}
     </section>
   `;
 }
@@ -1993,6 +2039,17 @@ function bindPendingEvents() {
       render();
     });
   });
+  document.querySelectorAll("[data-pending-tabs]").forEach((select) => {
+    select.addEventListener("change", (event) => {
+      state.pendingTabs = Number(event.target.value) || 3;
+      try {
+        localStorage.setItem("hrauto.pendingTabs", String(state.pendingTabs));
+      } catch {
+        // Only a convenience; the choice still applies to this session.
+      }
+      render();
+    });
+  });
   const search = document.querySelector("#pendingCustomSearch");
   search?.addEventListener("input", (event) => {
     state.pendingCustomSearch = event.target.value;
@@ -2302,6 +2359,7 @@ async function handleAction(button, options = {}) {
           groupIds: scope === "custom" ? [...state.pendingCustomSelected] : [],
           deleteMode: "all",
           olderThanDays: 0,
+          tabs: state.pendingTabs,
         }),
       });
       state.pendingSelectionInitFor = null;
@@ -2330,7 +2388,7 @@ async function handleAction(button, options = {}) {
       );
       const posts = groups.reduce((total, group) => total + group.pendingCount, 0);
       const typed = window.prompt(
-        `จะลบโพสต์ค้างสูงสุด ${posts} โพสต์ ใน ${groups.length} กลุ่ม และกู้คืนไม่ได้
+        `จะลบโพสต์ค้างสูงสุด ${posts} โพสต์ ใน ${groups.length} กลุ่ม (${state.pendingTabs} แท็บพร้อมกัน) และกู้คืนไม่ได้
 พิมพ์ ลบ เพื่อยืนยัน:`,
         "",
       );
@@ -2350,6 +2408,7 @@ async function handleAction(button, options = {}) {
           deleteMode: "all",
           olderThanDays: 0,
           acknowledged: true,
+          tabs: state.pendingTabs,
         }),
       });
       await refreshAll();
