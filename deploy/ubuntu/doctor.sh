@@ -35,7 +35,26 @@ df -h /var/lib/hr-auto 2>/dev/null | sed 's/^/  /'
 echo "  load: $(cut -d' ' -f1-3 /proc/loadavg)"
 
 echo "== Thai fonts"
-if fc-list :lang=th 2>/dev/null | grep -q .; then ok "Thai fonts installed"; else bad "no Thai fonts -> sudo apt install fonts-thai-tlwg"; fi
+# Capture first: `fc-list | grep -q` makes fc-list die of SIGPIPE, which
+# pipefail reports as failure even when Thai fonts are present.
+THAI_FONTS="$(fc-list :lang=th family 2>/dev/null | sort -u)"
+if [[ -n "$THAI_FONTS" ]]; then
+  ok "Thai fonts: $(printf '%s' "$THAI_FONTS" | wc -l) families (e.g. $(printf '%s' "$THAI_FONTS" | head -1))"
+else
+  bad "no Thai fonts -> sudo apt install fonts-thai-tlwg fonts-noto-core"
+fi
+
+echo "== Disk"
+ROOT_AVAIL_GB="$(df --output=avail -BG / | tail -1 | tr -dc '0-9')"
+if (( ROOT_AVAIL_GB < 5 )); then
+  bad "only ${ROOT_AVAIL_GB} GB free on / (evidence screenshots need room)"
+  if command -v lvs >/dev/null 2>&1 && [[ -n "$(vgs --noheadings -o vg_free --units g 2>/dev/null | tr -dc '0-9.' )" ]]; then
+    echo "       unallocated LVM space: $(vgs --noheadings -o vg_name,vg_free --units g 2>/dev/null | xargs)"
+    echo "       grow / into it: sudo lvextend -r -l +100%FREE /dev/mapper/ubuntu--vg-ubuntu--lv"
+  fi
+else
+  ok "${ROOT_AVAIL_GB} GB free on /"
+fi
 
 echo "== Chromium"
 if ls /opt/hr-auto/browsers/chromium-*/chrome-linux*/chrome >/dev/null 2>&1; then ok "Chromium found in /opt/hr-auto/browsers"; else bad "Chromium missing -> run install.sh again"; fi
