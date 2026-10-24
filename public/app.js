@@ -854,12 +854,18 @@ function updateGroupResults() {
     resultCount.textContent = `แสดง ${groups.length.toLocaleString("th-TH")} รายการ`;
   }
   if (tableBody) tableBody.innerHTML = renderGroupRows(groups);
-  const selectAll = document.querySelector("#selectAllGroups");
-  if (selectAll) {
-    const selectedVisible = groups.filter((group) => state.selectedGroups.has(group.id)).length;
+  syncSelectAllControls(groups);
+}
+
+/** Desktop header checkbox and the phone "select all" bar share one state. */
+function syncSelectAllControls(groups = filteredGroups()) {
+  const selectedVisible = groups.filter((group) => state.selectedGroups.has(group.id)).length;
+  document.querySelectorAll("#selectAllGroups, [data-select-all-groups]").forEach((selectAll) => {
     selectAll.checked = groups.length > 0 && selectedVisible === groups.length;
     selectAll.indeterminate = selectedVisible > 0 && selectedVisible < groups.length;
-  }
+  });
+  const count = document.querySelector("#groupSelectAllCount");
+  if (count) count.textContent = groups.length.toLocaleString("th-TH");
 }
 
 function scheduleGroupResultsUpdate() {
@@ -968,6 +974,13 @@ function renderGroups() {
         `
         : ""
     }
+    <div class="group-select-bar">
+      <label class="select-all-row">
+        <input type="checkbox" data-select-all-groups aria-label="เลือกทุกกลุ่มที่แสดงอยู่" />
+        <span>เลือกทั้งหมดที่แสดง (<b id="groupSelectAllCount">${groups.length.toLocaleString("th-TH")}</b> กลุ่ม)</span>
+      </label>
+      ${selected ? `<button class="button button-ghost button-small" data-action="clear-selection" aria-label="ล้างกลุ่มที่เลือกทั้งหมด">ล้าง</button>` : ""}
+    </div>
     <div class="data-table-wrap">
       <table class="data-table groups-table">
         <thead>
@@ -2686,13 +2699,16 @@ function bindGroupEvents() {
     state.groupStatus = event.target.value;
     scheduleGroupResultsUpdate();
   });
-  document.querySelector("#selectAllGroups")?.addEventListener("change", (event) => {
-    filteredGroups().forEach((group) => {
-      if (event.target.checked) state.selectedGroups.add(group.id);
-      else state.selectedGroups.delete(group.id);
+  document.querySelectorAll("#selectAllGroups, [data-select-all-groups]").forEach((selectAll) => {
+    selectAll.addEventListener("change", (event) => {
+      filteredGroups().forEach((group) => {
+        if (event.target.checked) state.selectedGroups.add(group.id);
+        else state.selectedGroups.delete(group.id);
+      });
+      render();
     });
-    render();
   });
+  syncSelectAllControls();
   document.querySelector("#groupTableBody")?.addEventListener("change", (event) => {
     const checkbox = event.target.closest?.(".group-check");
     if (checkbox) {

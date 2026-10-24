@@ -329,6 +329,12 @@ input.toggle:focus-visible {
   background: #f5f8ff;
 }
 
+/* Phone-only "select all" bar (the desktop header checkbox lives in the
+   table header, which phones hide). */
+.group-select-bar {
+  display: none;
+}
+
 /* ---- Runs page ---- */
 .help-details {
   margin-bottom: 12px;
@@ -686,6 +692,34 @@ input.toggle:focus-visible {
 
   .queue-actions .button-primary {
     max-width: none;
+  }
+
+  .group-select-bar {
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+
+  .select-all-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--ink-700);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .select-all-row input {
+    width: 22px;
+    height: 22px;
+    flex: 0 0 auto;
   }
 
   /* Group table becomes a list of cards. */
