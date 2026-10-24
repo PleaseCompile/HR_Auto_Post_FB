@@ -486,6 +486,11 @@ function renderSession(session) {
   }
 }
 
+window.addEventListener("hashchange", () => {
+  const route = routeFromHash();
+  if (route !== state.route) navigate(route);
+});
+
 function routeFromHash() {
   const route = window.location.hash.replace(/^#/, "");
   return routes[route] ? route : "dashboard";
@@ -494,9 +499,11 @@ function routeFromHash() {
 function navigate(route) {
   state.route = route;
   // Keep the page in the URL: phones reload background tabs often, and a
-  // reload should land back on the same page.
+  // reload should land back on the same page. Each page is a history entry so
+  // the phone's back button/gesture returns to the previous page.
   if (window.location.hash !== `#${route}`) {
-    history.replaceState(null, "", `#${route}`);
+    if (window.location.hash) window.location.hash = route;
+    else history.replaceState(null, "", `#${route}`);
   }
   const [eyebrow, title] = routes[route] || routes.dashboard;
   pageEyebrow.textContent = eyebrow;
@@ -1338,7 +1345,7 @@ function renderPendingResults(cleanup, sessionReady) {
         <button class="button button-ghost button-small" data-action="rescan-pending" ${deleting ? "disabled" : ""}>ตรวจใหม่</button>
       </div>
       <div class="data-table-wrap">
-        <table class="data-table">
+        <table class="data-table pending-table">
           <thead>
             <tr>
               <th class="col-check"><input type="checkbox" data-action="toggle-pending-all" ${
@@ -1355,7 +1362,7 @@ function renderPendingResults(cleanup, sessionReady) {
               .map(
                 (group) => `
                   <tr>
-                    <td class="col-check"><input type="checkbox" data-action="toggle-pending-group" data-id="${group.id}" ${
+                    <td class="col-check"><input type="checkbox" aria-label="เลือกกลุ่มนี้" data-action="toggle-pending-group" data-id="${group.id}" ${
                       selectedIds.has(group.id) ? "checked" : ""
                     } ${deleting ? "disabled" : ""} /></td>
                     <td>
