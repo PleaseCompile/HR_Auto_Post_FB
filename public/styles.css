@@ -2490,6 +2490,14 @@ textarea:focus {
     flex-wrap: wrap;
   }
 
+  /* Some toolbars set fixed inline widths (e.g. style="width:270px"); cap
+     them so dropdowns never run off the right edge of a phone screen. */
+  .page-content select,
+  .page-content input[type="search"],
+  .page-content input[type="text"] {
+    max-width: 100%;
+  }
+
   /* Bigger touch targets for the controls used most from a phone. */
   .button {
     min-height: 40px;
