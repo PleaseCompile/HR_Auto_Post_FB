@@ -2,7 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Page } from "playwright";
 import { pendingCleanupDirectory, timezone } from "./config.js";
-import { checkSecurityCheckpoint, SecurityCheckpointError } from "./facebook.js";
+import {
+  checkSecurityCheckpoint,
+  rateLimitMessage,
+  SecurityCheckpointError,
+} from "./facebook.js";
 import { browserSession } from "./session.js";
 import {
   addPendingCleanupGroups,
@@ -386,23 +390,31 @@ export async function markPendingCards(page: Page): Promise<PendingCardSnapshot[
  * Published, Declined and Removed together and prints a number only for the rows that
  * have one, so the count has to be tied to the Pending label: a bare "N posts" match
  * picked up the Published total and reported an already-clean group as unreadable.
+ *
+ * Read from the page's text lines, which on the live page run "Pending", ["New content
+ * indicator",] "19 posts", "Published", … — the sidebar rows are plain divs, so element
+ * selectors such as [role="navigation"] a never reached them. The list header
+ * ("Pending · 19") is accepted too.
  */
-async function readPendingHeaderCount(page: Page): Promise<number | null> {
+export async function readPendingHeaderCount(page: Page): Promise<number | null> {
   return page.evaluate(() => {
-    const clean = (value: string | null | undefined) =>
-      (value || "").replace(/\s+/g, " ").trim();
-    const label = /(?:pending|รอ(?:การ)?อนุมัติ|รอดำเนินการ)/i;
-    const scopes = Array.from(
-      document.querySelectorAll<HTMLElement>('h1, h2, h3, [role="heading"], [role="navigation"] a, [role="tab"]'),
-    );
-    for (const scope of scopes) {
-      if (!scope.getClientRects().length) continue;
-      const text = clean(scope.innerText);
-      const at = text.search(label);
-      if (at < 0) continue;
-      // Only read digits that follow the Pending label inside this one element.
-      const match = text.slice(at).match(/^[^\d]{0,40}(\d+)/);
-      if (match && match[1] !== undefined) return Number(match[1]);
+    const lines = (document.body.innerText || "")
+      .split("\n")
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    const pending = /^(pending|รอดำเนินการ|รอการอนุมัติ|รออนุมัติ)\b/i;
+    const otherRow = /^(published|declined|removed|เผยแพร่แล้ว|ถูกปฏิเสธ|ถูกลบ|ถูกนำออก)/i;
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index] as string;
+      if (!pending.test(line)) continue;
+      const inline = line.match(/[·:]\s*(\d+)\s*$/);
+      if (inline?.[1]) return Number(inline[1]);
+      for (let next = index + 1; next < Math.min(lines.length, index + 4); next += 1) {
+        const row = lines[next] as string;
+        if (otherRow.test(row) || pending.test(row)) break;
+        const count = row.match(/^(\d+)\s*(posts?|โพสต์)/i);
+        if (count?.[1]) return Number(count[1]);
+      }
     }
     return null;
   });
@@ -419,10 +431,12 @@ export type PendingListState =
   | "empty"
   | "membership-pending"
   | "unavailable"
+  | "rate-limited"
   | "unknown";
 
 export async function waitForPendingList(page: Page): Promise<PendingListState> {
   const deadline = Date.now() + PAGE_TIMEOUT_MS;
+  let emptyStreak = 0;
   while (Date.now() < deadline) {
     const seen = await page
       .evaluate(() => {
@@ -435,6 +449,10 @@ export async function waitForPendingList(page: Page): Promise<PendingListState> 
         }
         if (/this content isn't available|เนื้อหานี้ไม่พร้อมใช้งาน/i.test(text)) {
           return { cards: 0, empty: false, blocked: "unavailable" as const };
+        }
+        // Mirrors rateLimitPattern in facebook.ts (this runs inside the page).
+        if (/temporarily blocked|misusing this feature by going too fast|ถูกบล็อกชั่วคราว/i.test(text)) {
+          return { cards: 0, empty: false, blocked: "rate-limited" as const };
         }
         const clean = (value: string | null | undefined) =>
           (value || "").replace(/\s+/g, " ").trim();
@@ -457,7 +475,16 @@ export async function waitForPendingList(page: Page): Promise<PendingListState> 
       .catch(() => ({ cards: 0, empty: false, blocked: null }));
     if (seen.blocked) return seen.blocked;
     if (seen.cards > 0) return "cards";
-    if (seen.empty) return "empty";
+    if (seen.empty) {
+      // Trust "No posts to show" only while the sidebar claims no pending count, and
+      // only once it has held across two polls — a page still streaming in must not
+      // be written off as clean and skipped.
+      const claimed = await readPendingHeaderCount(page).catch(() => null);
+      emptyStreak = claimed ? 0 : emptyStreak + 1;
+      if (emptyStreak >= 2) return "empty";
+    } else {
+      emptyStreak = 0;
+    }
     await page.waitForTimeout(600);
   }
   return "unknown";
@@ -767,9 +794,11 @@ class PendingCleaner {
             selected: result.count > 0,
             scannedAt: new Date().toISOString(),
             message:
-              result.count > 0
-                ? `พบ ${result.count} โพสต์ค้างรออนุมัติ`
-                : "ไม่มีโพสต์ค้าง",
+              result.count === 0
+                ? "ไม่มีโพสต์ค้าง"
+                : result.read < result.count
+                  ? `Facebook แจ้ง ${result.count} โพสต์ค้าง · โหลดการ์ดขึ้นมา ${result.read}`
+                  : `พบ ${result.count} โพสต์ค้างรออนุมัติ`,
           });
         } catch (error) {
           if (error instanceof SecurityCheckpointError) throw error;
@@ -815,7 +844,7 @@ class PendingCleaner {
   private async scanGroup(
     page: Page,
     group: PendingCleanupGroupRecord,
-  ): Promise<{ count: number }> {
+  ): Promise<{ count: number; read: number }> {
     await page.goto(
       `https://www.facebook.com/groups/${group.externalId}/my_pending_content`,
       { waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT_MS },
@@ -825,8 +854,11 @@ class PendingCleaner {
 
     const listState = await this.waitForPendingList(page);
     if (listState === "empty") {
+      if (process.env.HR_AUTO_PENDING_DEBUG_EMPTY === "true") {
+        await this.captureDiagnostic(page, group, "scan-empty");
+      }
       replacePendingCleanupPosts(group.id, []);
-      return { count: 0 };
+      return { count: 0, read: 0 };
     }
 
     await this.scrollPendingList(page);
@@ -867,11 +899,16 @@ class PendingCleaner {
         }`,
       );
     }
-    return { count: cards.length };
+    // Facebook's own total wins when the page would not render every card; the delete
+    // pass keeps going until no Delete button is left, so it clears the rest too.
+    return { count: Math.max(cards.length, headerCount ?? 0), read: cards.length };
   }
 
   private async waitForPendingList(page: Page): Promise<PendingListState> {
     const state = await waitForPendingList(page);
+    // Every further page load extends the block, so this ends the whole sweep — all
+    // tabs — rather than failing one group and moving on as it used to.
+    if (state === "rate-limited") throw new SecurityCheckpointError(rateLimitMessage);
     if (state === "membership-pending") {
       throw new Error(
         "แอดมินยังไม่อนุมัติการเป็นสมาชิก · Facebook ไม่ให้ลบโพสต์ที่รอตรวจในกลุ่มนี้ (มีแค่ปุ่ม Cancel Request ซึ่งจะยกเลิกคำขอเข้ากลุ่มด้วย)",
@@ -901,15 +938,24 @@ class PendingCleaner {
         ).length;
       });
 
+    // With the sidebar's total known, keep scrolling until that many cards are on the
+    // page: one quiet round used to end the wait while Facebook was still streaming,
+    // so a group showing "Pending · 6" was recorded as 2.
+    const expected = (await readPendingHeaderCount(page).catch(() => null)) || 0;
+    const rounds = Math.max(12, Math.ceil(expected / 3) + 6);
+    const quietRoundsAllowed = expected ? 4 : 2;
     let previous = await countCards();
-    for (let round = 0; round < 12; round += 1) {
+    let quiet = 0;
+    for (let round = 0; round < rounds; round += 1) {
+      if (expected && previous >= expected) break;
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await page.waitForTimeout(1_200);
       const count = await countCards();
       // A count that is still zero means the list has not arrived yet, never that it
       // has stopped growing — treating those as equal used to end the wait after one
       // round and hand an empty page to the extractor.
-      if (count > 0 && count === previous) break;
+      quiet = count > 0 && count === previous ? quiet + 1 : 0;
+      if (quiet >= quietRoundsAllowed) break;
       previous = count;
     }
   }

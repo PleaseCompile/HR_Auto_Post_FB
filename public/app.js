@@ -992,15 +992,16 @@ function renderPendingSetup(cleanup, sessionReady) {
   `;
 }
 
-// Every tab is the same Facebook account, so more tabs mean faster deletes from one
-// account; past five the picker says so.
+// Every tab is the same Facebook account, so more tabs mean faster requests from one
+// account. A five-tab scan of every group got the account "Temporarily Blocked", so
+// anything above three carries a warning.
 function renderPendingTabsPicker(disabled) {
   const options = [
     [1, "1 แท็บ (ช้าสุด ปลอดภัยสุด)"],
     [2, "พร้อมกัน 2 แท็บ"],
     [3, "พร้อมกัน 3 แท็บ (แนะนำ)"],
-    [5, "พร้อมกัน 5 แท็บ"],
-    [8, "พร้อมกัน 8 แท็บ (เสี่ยง)"],
+    [5, "พร้อมกัน 5 แท็บ (เสี่ยง)"],
+    [8, "พร้อมกัน 8 แท็บ (เสี่ยงมาก)"],
     [10, "พร้อมกัน 10 แท็บ (เสี่ยงสุด)"],
   ];
   return `
@@ -1016,8 +1017,8 @@ function renderPendingTabsPicker(disabled) {
 }
 
 function renderPendingTabsWarning() {
-  return state.pendingTabs > 5
-    ? `<p class="pending-tabs-warning">เกิน 5 แท็บ Facebook อาจมองว่าบัญชีทำงานเร็วผิดปกติและขึ้นหน้าตรวจความปลอดภัย ระบบจะหยุดทุกแท็บทันทีถ้าเจอ</p>`
+  return state.pendingTabs > 3
+    ? `<p class="pending-tabs-warning">เคยทดสอบตรวจทุกกลุ่มด้วย 5 แท็บแล้ว Facebook บล็อกชั่วคราวเพราะใช้งานเร็วเกินไป (You’re Temporarily Blocked) · ถ้าเจออีก ระบบจะหยุดทุกแท็บทันที</p>`
     : "";
 }
 

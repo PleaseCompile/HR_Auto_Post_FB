@@ -30,8 +30,18 @@ export class SecurityCheckpointError extends Error {
 const securityPattern =
   /log in|เข้าสู่ระบบ|checkpoint|security check|ตรวจสอบความปลอดภัย|captcha|account restricted|ถูกจำกัดการใช้งาน|ยืนยันตัวตน|ยืนยันบัญชี|suspicious activity/i;
 
+// Wording from the live block page: "You're Temporarily Blocked … going too fast".
+export const rateLimitPattern =
+  /temporarily blocked|misusing this feature by going too fast|ถูกบล็อกชั่วคราว/i;
+
+export const rateLimitMessage =
+  "Facebook บล็อกชั่วคราวเพราะใช้งานเร็วเกินไป (You're Temporarily Blocked) · หยุดทุกแท็บแล้ว พักสักพักก่อนลองใหม่ และลดจำนวนแท็บ";
+
 export async function checkSecurityCheckpoint(page: Page): Promise<void> {
   const bodyText = await page.locator("body").innerText().catch(() => "");
+  if (rateLimitPattern.test(bodyText)) {
+    throw new SecurityCheckpointError(rateLimitMessage);
+  }
   if (securityPattern.test(bodyText)) {
     throw new SecurityCheckpointError(
       "Facebook ต้องการให้ยืนยันตัวตน (Security Check/CAPTCHA/Checkpoint) หรือบัญชีถูกจำกัดการใช้งาน",
