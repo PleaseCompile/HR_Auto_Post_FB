@@ -3,7 +3,9 @@ import { browserSession } from "./session.js";
 import { availableMemoryBytes, hasMemoryPressure } from "./system-status.js";
 import {
   captureEvidence,
+  ensurePostButtonClickable,
   inspectGroup,
+  PostButtonBlockedError,
   preparePost,
   submitPreparedPost,
   SecurityCheckpointError,
@@ -12,7 +14,6 @@ import {
 import {
   getRun,
   markGroupPosted,
-  moveTargetToEnd,
   updateRunStatus,
   updateTarget,
 } from "./db.js";
@@ -57,28 +58,22 @@ interface Controller {
   finished: boolean;
   /** Auto-confirm: when each prepared tab becomes due for its Post click. */
   autoDueAt: Map<string, number>;
-  /** Targets moved to the back of the queue while the run is going. */
-  retryQueue: RunTargetRecord[];
-  /** Automatic re-queues per target, capped so a broken group cannot loop. */
-  requeueCounts: Map<string, number>;
-  /** Closed tabs whose outcome (retry or manual check) is still being decided. */
-  deciding: number;
 }
+
+/**
+ * Only a target nobody has touched yet is ever posted. Anything else — failed, timed
+ * out, closed, crashed — may already be on Facebook (a Post click that timed out can
+ * still have gone through), so it is never retried automatically; the user checks
+ * those by hand.
+ */
+const isUntouched = (target: RunTargetRecord) =>
+  target.status === "queued" && Boolean(target.group);
 
 const delay = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 const randomBetween = (min: number, max: number) =>
   Math.floor(Math.random() * (Math.max(min, max) - min + 1)) + min;
-
-// A target that failed before the system ever pressed Post is safe to retry:
-// it goes to the back of the queue this many times before being marked failed.
-const MAX_AUTO_REQUEUES = Math.max(0, Number(process.env.HR_AUTO_MAX_AUTO_REQUEUES ?? 1));
-// Never retry automatically when retrying cannot help or could be unsafe.
-const NO_RETRY_CODES = new Set(["SECURITY_CHECKPOINT", "PROFILE_LOCKED"]);
-// How long to wait after a tab closes before deciding whether the whole
-// browser went away (its page "close" events arrive before the context's).
-const BROWSER_GONE_CHECK_MS = 1_500;
 
 const DEFAULT_HYBRID_TAB_LIMIT = 10;
 const DEFAULT_HYBRID_WINDOWS_TAB_LIMIT = 30;
@@ -110,6 +105,9 @@ function classifyAutomationError(
       code: "SECURITY_CHECKPOINT",
       message: "Facebook ต้องการให้ยืนยันตัวตน (Security Check/CAPTCHA/Checkpoint) หรือบัญชีถูกจำกัดการใช้งาน",
     };
+  }
+  if (error instanceof PostButtonBlockedError) {
+    return { code: "POST_BUTTON_BLOCKED", message: raw };
   }
   if (rendererCrashed || /\bcrash(?:ed)?\b|page crashed/i.test(raw)) {
     return {
@@ -164,8 +162,13 @@ class RunManager {
     }
     const run = getRun(runId);
     if (!run) throw new Error("ไม่พบคิวงาน");
-    if (!["queued", "interrupted", "stopped"].includes(run.status)) {
+    if (!["queued", "interrupted", "stopped", "failed"].includes(run.status)) {
       throw new Error(`ไม่สามารถเริ่มคิวที่มีสถานะ ${run.status}`);
+    }
+    if (run.mode === "assisted" && !(run.targets || []).some(isUntouched)) {
+      throw new Error(
+        "คิวนี้ไม่มีรายการที่ยังไม่เคยทำเหลือแล้ว · รายการที่เคยทำไปแล้วจะไม่ถูกโพสต์ซ้ำ กรุณาตรวจรายการสีส้ม/แดงใน Facebook เอง",
+      );
     }
     const requestedTabLimit =
       run.workflow === "hybrid-windows"
@@ -196,9 +199,6 @@ class RunManager {
       acting: new Set(),
       finished: false,
       autoDueAt: new Map(),
-      retryQueue: [],
-      requeueCounts: new Map(),
-      deciding: 0,
     };
     this.controllers.set(runId, controller);
     void this.execute(runId, controller);
@@ -213,6 +213,8 @@ class RunManager {
   resume(runId: string): void {
     const controller = this.requireController(runId);
     controller.paused = false;
+    // The user has looked at whatever paused the run; start counting afresh.
+    controller.consecutiveAutoConfirmFailures = 0;
     updateRunStatus(
       runId,
       controller.prepared.size ? "awaiting_confirmation" : "running",
@@ -243,98 +245,6 @@ class RunManager {
       return;
     }
     await this.settlePrepared(runId, controller, targetId, action, reason);
-  }
-
-  /**
-   * User asked to retry a target later: close its tab (if any) and move it to
-   * the back of the queue. Only for targets the system never pressed Post on
-   * (awaiting confirmation), or ones the user has checked in Facebook.
-   */
-  async requeue(runId: string, targetId: string): Promise<void> {
-    const controller = this.requireController(runId);
-    if (controller.workflow !== "hybrid-tabs") {
-      throw new Error("ย้ายไปท้ายคิวได้เฉพาะคิวแบบ Hybrid");
-    }
-    if (controller.acting.has(targetId)) throw new Error("กลุ่มนี้กำลังกดโพสต์อยู่ ย้ายไม่ได้");
-    if (controller.prepared.has(targetId)) {
-      await this.requeuePrepared(runId, controller, targetId, "ย้ายไปลองใหม่ท้ายคิวตามที่คุณสั่ง");
-      return;
-    }
-    const target = getRun(runId)?.targets?.find((item) => item.id === targetId);
-    if (!target) throw new Error("ไม่พบกลุ่มนี้ในคิว");
-    if (!["manual_action_required", "failed", "skipped"].includes(target.status)) {
-      throw new Error("ย้ายไปท้ายคิวได้เฉพาะกลุ่มที่รอยืนยัน ต้องตรวจ ไม่สำเร็จ หรือข้าม");
-    }
-    this.requeueTarget(controller, target, "ย้ายไปลองใหม่ท้ายคิวตามที่คุณสั่ง");
-  }
-
-  private requeueTarget(
-    controller: Controller,
-    target: RunTargetRecord,
-    message: string,
-  ): void {
-    moveTargetToEnd(target.id);
-    updateTarget(target.id, "queued", { message, evidencePath: null, permalink: null });
-    controller.retryQueue.push({ ...target, status: "queued", message });
-  }
-
-  /** Close a prepared tab the system never posted from, and retry it last. */
-  private async requeuePrepared(
-    runId: string,
-    controller: Controller,
-    targetId: string,
-    message: string,
-  ): Promise<void> {
-    const pending = controller.prepared.get(targetId);
-    if (!pending) return;
-    controller.prepared.delete(targetId);
-    controller.autoDueAt.delete(targetId);
-    await this.closePrepared(controller, pending);
-    this.requeueTarget(controller, pending.target, message);
-    updateRunStatus(runId, controller.prepared.size ? "awaiting_confirmation" : "running");
-  }
-
-  /**
-   * Auto-confirm worker. Replaces one-shot timers, which silently gave up when
-   * they fired during a pause or while the tab was busy and left the tab stuck
-   * at "awaiting confirmation" forever. Posts one tab at a time, in due order,
-   * with a random gap between posts.
-   */
-  private async autoConfirmLoop(runId: string, controller: Controller): Promise<void> {
-    const minGap = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MIN_MS ?? 8_000);
-    let notBefore = 0;
-    while (!controller.stopped && !controller.finished) {
-      await delay(1_000);
-      if (controller.paused || controller.stopped || controller.acting.size) continue;
-      const now = Date.now();
-      if (now < notBefore) continue;
-      const due = [...controller.autoDueAt.entries()]
-        .filter(([targetId, dueAt]) => dueAt <= now && controller.prepared.has(targetId))
-        .sort((left, right) => left[1] - right[1])[0];
-      if (!due) continue;
-      const [targetId] = due;
-      controller.autoDueAt.delete(targetId);
-      try {
-        await this.action(runId, targetId, "confirm");
-      } catch (error) {
-        // The action failed before Post was pressed (the tab is still prepared).
-        if (controller.prepared.has(targetId) && !controller.acting.has(targetId)) {
-          const reason = error instanceof Error ? error.message : "ไม่ทราบสาเหตุ";
-          if (controller.workflow === "hybrid-tabs") {
-            await this.requeuePrepared(
-              runId,
-              controller,
-              targetId,
-              `โพสต์อัตโนมัติไม่สำเร็จ (${reason}) · ย้ายไปลองใหม่ท้ายคิว`,
-            );
-          } else {
-            // Multi-window tabs stay open by design: just try this tab again later.
-            controller.autoDueAt.set(targetId, Date.now() + 30_000);
-          }
-        }
-      }
-      notBefore = Date.now() + randomBetween(minGap, minGap * 2);
-    }
   }
 
   async markPostedBulk(
@@ -526,52 +436,22 @@ class RunManager {
     const pending = controller.prepared.get(targetId);
     if (!pending || controller.acting.has(targetId) || controller.stopped) return;
     controller.prepared.delete(targetId);
-    controller.autoDueAt.delete(targetId);
-    // The system never pressed Post in this tab, so retrying cannot double-post.
-    const retryLater = (message: string): boolean => {
-      const attempts = controller.requeueCounts.get(targetId) || 0;
-      if (controller.workflow !== "hybrid-tabs" || controller.stopped || attempts >= MAX_AUTO_REQUEUES) {
-        return false;
-      }
-      controller.requeueCounts.set(targetId, attempts + 1);
-      this.requeueTarget(controller, pending.target, message);
-      return true;
-    };
-    const settleStatus = () =>
-      updateRunStatus(runId, controller.prepared.size ? "awaiting_confirmation" : "running");
-
     if (kind === "crashed") {
       this.recordPreparationOutcome(controller, false, "RENDERER_CRASHED");
-      if (!retryLater("[RENDERER_CRASHED] แท็บหยุดทำงานก่อนกดโพสต์ · ย้ายไปลองใหม่ท้ายคิว")) {
-        updateTarget(targetId, "failed", {
-          message:
-            "[RENDERER_CRASHED] แท็บ Chromium หยุดทำงาน รายการนี้ยังไม่ถูกโพสต์และสามารถลองใหม่ได้",
-        });
-      }
-      settleStatus();
-      return;
+      updateTarget(targetId, "failed", {
+        message:
+          "[RENDERER_CRASHED] แท็บ Chromium หยุดทำงานก่อนกดโพสต์ · ระบบจะไม่ลองซ้ำเอง",
+      });
+    } else {
+      updateTarget(targetId, "manual_action_required", {
+        message:
+          "[TAB_CLOSED] แท็บถูกปิดก่อนบันทึกผล กรุณาตรวจ Facebook แล้วเลือกยืนยันว่าโพสต์เอง หากโพสต์สำเร็จ",
+      });
     }
-
-    // One tab closed by the user: they may have posted by hand, so ask them.
-    // The whole browser gone (crash, killed for memory): retry, it relaunches.
-    controller.deciding += 1;
-    setTimeout(() => {
-      controller.deciding -= 1;
-      if (controller.stopped) return;
-      const browserGone = !browserSession.isOpen();
-      if (
-        !browserGone ||
-        !retryLater(
-          "[BROWSER_CLOSED] Browser ปิดตัวกะทันหันก่อนกดโพสต์ (อาจเพราะ RAM เต็ม) · เปิดใหม่และย้ายไปลองใหม่ท้ายคิว",
-        )
-      ) {
-        updateTarget(targetId, "manual_action_required", {
-          message:
-            "[TAB_CLOSED] แท็บถูกปิดก่อนบันทึกผล กรุณาตรวจ Facebook แล้วเลือกยืนยันว่าโพสต์เอง หากโพสต์สำเร็จ",
-        });
-      }
-      settleStatus();
-    }, BROWSER_GONE_CHECK_MS);
+    updateRunStatus(
+      runId,
+      controller.prepared.size ? "awaiting_confirmation" : "running",
+    );
   }
 
   private waitForAction(controller: Controller, targetId: string): Promise<ActionRequest> {
@@ -632,6 +512,7 @@ class RunManager {
     if (!pending) throw new Error("ไม่พบโพสต์ที่เตรียมไว้สำหรับกลุ่มนี้");
     if (controller.acting.has(targetId)) throw new Error("กลุ่มนี้กำลังประมวลผลอยู่");
     controller.acting.add(targetId);
+    let submitAttempted = false;
 
     try {
       if (action === "skip") {
@@ -675,7 +556,10 @@ class RunManager {
           "ระบบเตรียมโพสต์ในแท็บนี้ไม่ครบ กรุณาจัดการใน Facebook แล้วเลือก “ฉันโพสต์เองแล้ว” หรือ “ข้าม”",
         );
       }
+      // Proven before the first real click; a failure here means nothing was sent.
+      await ensurePostButtonClickable(pending.prepared);
       updateTarget(targetId, "submitting", { message: "กำลังกดโพสต์ในแท็บนี้" });
+      submitAttempted = true;
       const result = await submitPreparedPost(pending.prepared);
       const evidencePath = await captureEvidence({
         page: pending.page,
@@ -710,7 +594,23 @@ class RunManager {
         suffix: "action-failed",
         postText: pending.draft.text,
       }).catch(() => null);
-      updateTarget(targetId, "failed", { message, evidencePath });
+      if (submitAttempted) {
+        // The Post button was already being clicked: a timeout here does not mean the
+        // post failed, so the target must not look retryable.
+        updateTarget(targetId, "manual_action_required", {
+          message: `[UNCERTAIN_SUBMIT] กดโพสต์แล้วแต่ไม่ได้รับผลยืนยัน อาจโพสต์สำเร็จแล้ว · กรุณาตรวจ Facebook · ${message}`,
+          evidencePath,
+        });
+      } else if (classified.code === "POST_BUTTON_BLOCKED") {
+        // Never clicked, so this group is still untouched as far as Facebook knows:
+        // it goes back to white and the next "post untouched" pass picks it up.
+        updateTarget(targetId, "queued", {
+          message: `${message} · ยังไม่เคยโพสต์ ทำต่อได้`,
+          evidencePath,
+        });
+      } else {
+        updateTarget(targetId, "failed", { message, evidencePath });
+      }
       if (classified.code === "SECURITY_CHECKPOINT") {
         controller.paused = true;
         updateRunStatus(runId, "paused");
@@ -719,6 +619,15 @@ class RunManager {
         if (controller.consecutiveAutoConfirmFailures >= 2) {
           controller.paused = true;
           updateRunStatus(runId, "paused");
+          // Say why on the row the user will look at; a silent pause read as the
+          // run having stopped by itself.
+          const current = getRun(runId)?.targets?.find((target) => target.id === targetId);
+          if (current) {
+            updateTarget(targetId, current.status, {
+              message: `${current.message} · พักคิวอัตโนมัติ เพราะโพสต์อัตโนมัติไม่สำเร็จติดกัน 2 ครั้ง ตรวจแล้วกด "ทำต่อ"`,
+              evidencePath,
+            });
+          }
         }
       }
     } finally {
@@ -773,23 +682,6 @@ class RunManager {
         evidencePath,
       });
       updateRunStatus(run.id, "awaiting_confirmation");
-      return;
-    }
-    const attempts = controller.requeueCounts.get(target.id) || 0;
-    if (
-      controller.workflow === "hybrid-tabs" &&
-      !controller.stopped &&
-      !NO_RETRY_CODES.has(classified.code) &&
-      attempts < MAX_AUTO_REQUEUES
-    ) {
-      // Preparation never reaches the Post button, so a retry cannot double-post.
-      controller.requeueCounts.set(target.id, attempts + 1);
-      await page.close().catch(() => undefined);
-      this.requeueTarget(
-        controller,
-        target,
-        `เตรียมโพสต์ไม่สำเร็จ (${message}) · ย้ายไปลองใหม่ท้ายคิว (ครั้งที่ ${attempts + 1}/${MAX_AUTO_REQUEUES})`,
-      );
       return;
     }
     updateTarget(target.id, "failed", { message, evidencePath });
@@ -885,7 +777,7 @@ class RunManager {
       });
       updateRunStatus(run.id, "awaiting_confirmation");
 
-      if (controller.autoConfirm) {
+      if (controller.autoConfirm && !controller.stopped) {
         const minDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MIN_MS ?? 8_000);
         const maxDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MAX_MS ?? 150_000);
         // Picked up by autoConfirmLoop; survives pauses and busy moments.
@@ -903,10 +795,53 @@ class RunManager {
     }
   }
 
+  /**
+   * Fires the auto-confirm for one prepared tab. A timer that came due while the run
+   * was paused used to be dropped for good, so after "ทำต่อ" those tabs sat at
+   * "รอยืนยัน" forever and the run looked stopped; now it waits out the pause.
+   */
+  /**
+   * Auto-confirm worker: checks every second and posts due tabs one at a time,
+   * with a random gap between posts, so several tabs never post in the same
+   * moment (kinder to a single-core server and less bot-like). A pause or a busy
+   * tab just waits for the next tick; nothing is dropped. It never moves a
+   * group back to the queue: retry rules live in settlePrepared.
+   */
+  private async autoConfirmLoop(runId: string, controller: Controller): Promise<void> {
+    const minGap = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MIN_MS ?? 8_000);
+    let notBefore = 0;
+    while (!controller.stopped && !controller.finished) {
+      await delay(1_000);
+      if (controller.paused || controller.stopped || controller.acting.size) continue;
+      const now = Date.now();
+      if (now < notBefore) continue;
+      const due = [...controller.autoDueAt.entries()]
+        .filter(([targetId, dueAt]) => dueAt <= now && controller.prepared.has(targetId))
+        .sort((left, right) => left[1] - right[1])[0];
+      if (!due) continue;
+      const [targetId] = due;
+      controller.autoDueAt.delete(targetId);
+      try {
+        await this.action(runId, targetId, "confirm");
+      } catch (error) {
+        const classified = classifyAutomationError(error);
+        if (classified.code === "SECURITY_CHECKPOINT") {
+          controller.paused = true;
+          updateRunStatus(runId, "paused");
+        } else if (controller.prepared.has(targetId) && !controller.acting.has(targetId)) {
+          // Refused before anything was clicked (e.g. the tab was busy): try this
+          // same tab again shortly. Post was never pressed, so this cannot double-post.
+          controller.autoDueAt.set(targetId, Date.now() + 30_000);
+        }
+      }
+      notBefore = Date.now() + randomBetween(minGap, minGap * 2);
+    }
+  }
+
   private async executeSequential(run: RunRecord, controller: Controller): Promise<void> {
     for (const target of run.targets || []) {
       if (controller.stopped) break;
-      if (!["queued", "failed"].includes(target.status) || !target.group) continue;
+      if (!isUntouched(target)) continue;
       await this.waitWhilePaused(controller);
       if (controller.stopped) break;
 
@@ -923,30 +858,21 @@ class RunManager {
   }
 
   private async executeHybrid(run: RunRecord, controller: Controller): Promise<void> {
-    const pending = (run.targets || []).filter(
-      (target) => ["queued", "failed"].includes(target.status) && Boolean(target.group),
-    );
-    // Work through the original order first, then targets moved to the back
-    // (stuck or failed before Post). Keep going until nothing is in flight.
-    while (!controller.stopped) {
-      const target = pending.shift() || controller.retryQueue.shift();
-      if (!target) {
-        if (
-          controller.prepared.size === 0 &&
-          controller.acting.size === 0 &&
-          controller.deciding === 0
-        ) {
-          break;
-        }
-        await delay(250);
-        continue;
-      }
+    for (const target of run.targets || []) {
+      if (!isUntouched(target)) continue;
       await this.waitForCapacity(controller, target);
       if (controller.stopped) break;
       await this.prepareInNewTab(run, controller, target);
       if (!controller.stopped && PREPARATION_COOLDOWN_MS) {
         await delay(PREPARATION_COOLDOWN_MS);
       }
+    }
+
+    while (
+      !controller.stopped &&
+      (controller.prepared.size > 0 || controller.acting.size > 0)
+    ) {
+      await delay(250);
     }
     if (controller.stopped) {
       for (const targetId of [...controller.prepared.keys()]) {
@@ -959,10 +885,7 @@ class RunManager {
     run: RunRecord,
     controller: Controller,
   ): Promise<void> {
-    const targets = (run.targets || []).filter(
-      (target) =>
-        ["queued", "failed"].includes(target.status) && Boolean(target.group),
-    );
+    const targets = (run.targets || []).filter(isUntouched);
     const tabsPerWindow = Math.min(
       MAX_HYBRID_TABS_LIMIT,
       Math.max(1, controller.tabLimit || DEFAULT_HYBRID_WINDOWS_TAB_LIMIT),
@@ -1033,10 +956,15 @@ class RunManager {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ";
-      const run = getRun(runId);
-      run?.targets
-        ?.filter((target) => target.status === "queued")
-        .forEach((target) => updateTarget(target.id, "failed", { message }));
+      // Untouched targets stay "queued" so the run can carry on with exactly those;
+      // marking them failed used to hide which groups had never been tried.
+      getRun(runId)
+        ?.targets?.filter((target) => target.status === "queued")
+        .forEach((target) =>
+          updateTarget(target.id, "queued", {
+            message: `คิวหยุดก่อนถึงกลุ่มนี้ (${message}) · ยังไม่เคยโพสต์ ทำต่อได้`,
+          }),
+        );
       updateRunStatus(runId, "failed", { finish: true });
     } finally {
       controller.finished = true;

@@ -14,6 +14,8 @@
 | `HR_AUTO_PENDING_SCAN_DELAY_MS` | `1500` | เว้นระยะระหว่างเปิดแต่ละกลุ่มตอนตรวจหาโพสต์ค้าง ดู [PENDING-CLEANUP-TH.md](PENDING-CLEANUP-TH.md) |
 | `HR_AUTO_PENDING_DELETE_DELAY_MS` | `2500` | เว้นระยะระหว่างลบแต่ละโพสต์ค้าง |
 | `HR_AUTO_PENDING_CONFIRM_TIMEOUT_MS` | `10000` | เวลารอกล่องยืนยัน Delete post? ปรากฏก่อนกดยืนยันลบ |
+| `HR_AUTO_PENDING_TABS` | `3` | จำนวนแท็บพร้อมกันเริ่มต้นของการล้าง Pending (1–10) |
+| `HR_AUTO_PENDING_TAB_STAGGER_MS` | `2000` | เว้นระยะระหว่างเปิดแต่ละแท็บของการล้าง Pending |
 
 เซิร์ฟเวอร์ปัจจุบัน bind ที่ `127.0.0.1` เท่านั้น จึงเข้าถึงได้จากเครื่องเดียวและเปลี่ยนด้วย Environment Variable ไม่ได้
 

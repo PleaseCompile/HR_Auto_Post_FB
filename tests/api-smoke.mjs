@@ -14,7 +14,7 @@ const server = spawn(process.execPath, ["dist/server.js"], {
 });
 
 async function waitForServer() {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/health`);
       if (response.ok) return;

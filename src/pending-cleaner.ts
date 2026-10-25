@@ -2,7 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Page } from "playwright";
 import { pendingCleanupDirectory, timezone } from "./config.js";
-import { checkSecurityCheckpoint, SecurityCheckpointError } from "./facebook.js";
+import {
+  checkSecurityCheckpoint,
+  rateLimitMessage,
+  SecurityCheckpointError,
+} from "./facebook.js";
 import { browserSession } from "./session.js";
 import {
   addPendingCleanupGroups,
@@ -36,7 +40,27 @@ interface ScanOptions {
   groupIds: string[];
   deleteMode: PendingDeleteMode;
   olderThanDays: number;
+  tabs?: number;
 }
+
+/**
+ * Every tab acts as the same Facebook account, so more tabs multiply how fast that one
+ * account deletes. Ten is the ceiling; the UI recommends three.
+ */
+export const MAX_PENDING_TABS = 10;
+
+export function clampPendingTabs(value: unknown): number {
+  const number = Math.round(Number(value));
+  if (!Number.isFinite(number)) return 1;
+  return Math.min(MAX_PENDING_TABS, Math.max(1, number));
+}
+
+const DEFAULT_PENDING_TABS = clampPendingTabs(process.env.HR_AUTO_PENDING_TABS ?? 3);
+// Tabs open a few seconds apart so they do not all hit Facebook in the same instant.
+const TAB_STAGGER_MS = Math.max(
+  0,
+  Number(process.env.HR_AUTO_PENDING_TAB_STAGGER_MS ?? 2_000),
+);
 
 const SCAN_DELAY_MS = Math.max(
   0,
@@ -366,23 +390,31 @@ export async function markPendingCards(page: Page): Promise<PendingCardSnapshot[
  * Published, Declined and Removed together and prints a number only for the rows that
  * have one, so the count has to be tied to the Pending label: a bare "N posts" match
  * picked up the Published total and reported an already-clean group as unreadable.
+ *
+ * Read from the page's text lines, which on the live page run "Pending", ["New content
+ * indicator",] "19 posts", "Published", … — the sidebar rows are plain divs, so element
+ * selectors such as [role="navigation"] a never reached them. The list header
+ * ("Pending · 19") is accepted too.
  */
-async function readPendingHeaderCount(page: Page): Promise<number | null> {
+export async function readPendingHeaderCount(page: Page): Promise<number | null> {
   return page.evaluate(() => {
-    const clean = (value: string | null | undefined) =>
-      (value || "").replace(/\s+/g, " ").trim();
-    const label = /(?:pending|รอ(?:การ)?อนุมัติ|รอดำเนินการ)/i;
-    const scopes = Array.from(
-      document.querySelectorAll<HTMLElement>('h1, h2, h3, [role="heading"], [role="navigation"] a, [role="tab"]'),
-    );
-    for (const scope of scopes) {
-      if (!scope.getClientRects().length) continue;
-      const text = clean(scope.innerText);
-      const at = text.search(label);
-      if (at < 0) continue;
-      // Only read digits that follow the Pending label inside this one element.
-      const match = text.slice(at).match(/^[^\d]{0,40}(\d+)/);
-      if (match && match[1] !== undefined) return Number(match[1]);
+    const lines = (document.body.innerText || "")
+      .split("\n")
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    const pending = /^(pending|รอดำเนินการ|รอการอนุมัติ|รออนุมัติ)\b/i;
+    const otherRow = /^(published|declined|removed|เผยแพร่แล้ว|ถูกปฏิเสธ|ถูกลบ|ถูกนำออก)/i;
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index] as string;
+      if (!pending.test(line)) continue;
+      const inline = line.match(/[·:]\s*(\d+)\s*$/);
+      if (inline?.[1]) return Number(inline[1]);
+      for (let next = index + 1; next < Math.min(lines.length, index + 4); next += 1) {
+        const row = lines[next] as string;
+        if (otherRow.test(row) || pending.test(row)) break;
+        const count = row.match(/^(\d+)\s*(posts?|โพสต์)/i);
+        if (count?.[1]) return Number(count[1]);
+      }
     }
     return null;
   });
@@ -394,13 +426,34 @@ async function readPendingHeaderCount(page: Page): Promise<number | null> {
  * regularly reads an empty page. This polls until a card, the empty state, or the
  * timeout shows up before anything tries to extract.
  */
-export async function waitForPendingList(
-  page: Page,
-): Promise<"cards" | "empty" | "unknown"> {
+export type PendingListState =
+  | "cards"
+  | "empty"
+  | "membership-pending"
+  | "unavailable"
+  | "rate-limited"
+  | "unknown";
+
+export async function waitForPendingList(page: Page): Promise<PendingListState> {
   const deadline = Date.now() + PAGE_TIMEOUT_MS;
+  let emptyStreak = 0;
   while (Date.now() < deadline) {
     const seen = await page
       .evaluate(() => {
+        const text = document.body.innerText || "";
+        // Two dead ends taken from the live page, neither of which ever shows a
+        // Delete button: admins have not approved the membership yet (the only
+        // control is "Cancel Request"), or the group is gone or no longer open to us.
+        if (/your review is still pending|การตรวจสอบของคุณยังอยู่ระหว่างดำเนินการ/i.test(text)) {
+          return { cards: 0, empty: false, blocked: "membership-pending" as const };
+        }
+        if (/this content isn't available|เนื้อหานี้ไม่พร้อมใช้งาน/i.test(text)) {
+          return { cards: 0, empty: false, blocked: "unavailable" as const };
+        }
+        // Mirrors rateLimitPattern in facebook.ts (this runs inside the page).
+        if (/temporarily blocked|misusing this feature by going too fast|ถูกบล็อกชั่วคราว/i.test(text)) {
+          return { cards: 0, empty: false, blocked: "rate-limited" as const };
+        }
         const clean = (value: string | null | undefined) =>
           (value || "").replace(/\s+/g, " ").trim();
         const cards = Array.from(
@@ -417,11 +470,21 @@ export async function waitForPendingList(
           /no posts to show|no pending posts|nothing to show|ไม่มีโพสต์ที่จะแสดง|ไม่มีโพสต์ที่รอ|ยังไม่มีโพสต์|ไม่มีเนื้อหา/i.test(
             document.body.innerText || "",
           );
-        return { cards, empty };
+        return { cards, empty, blocked: null };
       })
-      .catch(() => ({ cards: 0, empty: false }));
+      .catch(() => ({ cards: 0, empty: false, blocked: null }));
+    if (seen.blocked) return seen.blocked;
     if (seen.cards > 0) return "cards";
-    if (seen.empty) return "empty";
+    if (seen.empty) {
+      // Trust "No posts to show" only while the sidebar claims no pending count, and
+      // only once it has held across two polls — a page still streaming in must not
+      // be written off as clean and skipped.
+      const claimed = await readPendingHeaderCount(page).catch(() => null);
+      emptyStreak = claimed ? 0 : emptyStreak + 1;
+      if (emptyStreak >= 2) return "empty";
+    } else {
+      emptyStreak = 0;
+    }
     await page.waitForTimeout(600);
   }
   return "unknown";
@@ -509,6 +572,7 @@ class PendingCleaner {
   private current: PendingCleanupState =
     getLatestPendingCleanupRun() || this.emptyState();
   private stopRequested = false;
+  private tabs = DEFAULT_PENDING_TABS;
 
   private emptyState(): PendingCleanupState {
     return {
@@ -540,7 +604,7 @@ class PendingCleaner {
     // sweep and survives a restart, so the in-memory copy is only a fallback for
     // the very first run when no cleanup exists yet.
     const stored = getLatestPendingCleanupRun() || this.current;
-    const state: PendingCleanupState = { ...stored };
+    const state: PendingCleanupState = { ...stored, tabs: this.tabs };
     if (withGroups && state.id) {
       state.groups = listPendingCleanupGroups(state.id, {
         withPosts: true,
@@ -590,6 +654,7 @@ class PendingCleaner {
     );
     this.current = created;
     this.stopRequested = false;
+    this.tabs = clampPendingTabs(options.tabs ?? DEFAULT_PENDING_TABS);
     void this.executeScan();
     return this.status();
   }
@@ -620,6 +685,7 @@ class PendingCleaner {
     deleteMode: PendingDeleteMode;
     olderThanDays: number;
     acknowledged: true;
+    tabs?: number;
   }): Promise<PendingCleanupState> {
     if (this.isBusy()) throw new Error("การล้าง Pending กำลังทำงานอยู่แล้ว");
     if (!this.current.id) throw new Error("ยังไม่มีผลการตรวจ กรุณาตรวจหาโพสต์ค้างก่อน");
@@ -646,6 +712,7 @@ class PendingCleaner {
       error: null,
     });
     this.stopRequested = false;
+    this.tabs = clampPendingTabs(input.tabs ?? DEFAULT_PENDING_TABS);
     void this.executeDelete(selected);
     return this.status();
   }
@@ -657,19 +724,65 @@ class PendingCleaner {
     if (refreshed && refreshed.id === this.current.id) this.current = refreshed;
   }
 
+  /**
+   * Works through `items` with up to `this.tabs` pages at once, each pulling the next
+   * item when it finishes its last. `work` handles a group's own failures; anything it
+   * throws (a security checkpoint, a closed browser) stops every tab and is rethrown.
+   */
+  private async runWithTabs<T>(
+    items: T[],
+    work: (page: Page, item: T, tab: number) => Promise<void>,
+  ): Promise<void> {
+    const count = Math.max(1, Math.min(this.tabs, items.length));
+    const pages: Page[] = [];
+    let next = 0;
+    let fatal: { error: unknown } | null = null;
+    const worker = async (slot: number) => {
+      if (slot && TAB_STAGGER_MS) await delay(slot * TAB_STAGGER_MS);
+      if (fatal || this.stopRequested || next >= items.length) return;
+      // A separate window per tab keeps each one visible: Facebook loads the pending
+      // list lazily, and a hidden background tab can stall that.
+      const page =
+        count === 1 ? await browserSession.newPage() : await browserSession.newWindow();
+      pages.push(page);
+      while (!fatal && !this.stopRequested && next < items.length) {
+        const item = items[next] as T;
+        next += 1;
+        await work(page, item, slot + 1);
+      }
+    };
+    try {
+      await Promise.all(
+        Array.from({ length: count }, (_, slot) =>
+          worker(slot).catch((error: unknown) => {
+            fatal ??= { error };
+            // Also cuts short the groups other tabs are in the middle of: after a
+            // checkpoint the account should stop acting at once, not finish a group.
+            this.stopRequested = true;
+          }),
+        ),
+      );
+    } finally {
+      await Promise.all(pages.map((page) => page.close().catch(() => undefined)));
+    }
+    if (fatal) throw (fatal as { error: unknown }).error;
+  }
+
+  private tabLabel(tab: number): string {
+    return this.tabs > 1 ? `แท็บ ${tab} · ` : "";
+  }
+
   private async executeScan(): Promise<void> {
     const cleanupId = this.current.id!;
-    const page = await browserSession.newPage();
     let scanned = 0;
     let withPending = 0;
     let found = 0;
     try {
       const groups = listPendingCleanupGroups(cleanupId);
-      for (const group of groups) {
-        if (this.stopRequested) break;
+      await this.runWithTabs(groups, async (page, group, tab) => {
         updatePendingCleanupGroup(group.id, {
           status: "scanning",
-          message: "กำลังเปิดหน้าโพสต์ที่รออนุมัติ",
+          message: `${this.tabLabel(tab)}กำลังเปิดหน้าโพสต์ที่รออนุมัติ`,
         });
         try {
           const result = await this.scanGroup(page, group);
@@ -681,9 +794,11 @@ class PendingCleaner {
             selected: result.count > 0,
             scannedAt: new Date().toISOString(),
             message:
-              result.count > 0
-                ? `พบ ${result.count} โพสต์ค้างรออนุมัติ`
-                : "ไม่มีโพสต์ค้าง",
+              result.count === 0
+                ? "ไม่มีโพสต์ค้าง"
+                : result.read < result.count
+                  ? `Facebook แจ้ง ${result.count} โพสต์ค้าง · โหลดการ์ดขึ้นมา ${result.read}`
+                  : `พบ ${result.count} โพสต์ค้างรออนุมัติ`,
           });
         } catch (error) {
           if (error instanceof SecurityCheckpointError) throw error;
@@ -701,7 +816,7 @@ class PendingCleaner {
           pendingFound: found,
         });
         if (!this.stopRequested && SCAN_DELAY_MS) await delay(SCAN_DELAY_MS);
-      }
+      });
 
       const finishedAt = new Date().toISOString();
       const snapshotPath = this.writeSnapshot(cleanupId, "scan");
@@ -722,7 +837,6 @@ class PendingCleaner {
           error instanceof Error ? error.message : "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ",
       });
     } finally {
-      await page.close().catch(() => undefined);
       this.stopRequested = false;
     }
   }
@@ -730,7 +844,7 @@ class PendingCleaner {
   private async scanGroup(
     page: Page,
     group: PendingCleanupGroupRecord,
-  ): Promise<{ count: number }> {
+  ): Promise<{ count: number; read: number }> {
     await page.goto(
       `https://www.facebook.com/groups/${group.externalId}/my_pending_content`,
       { waitUntil: "domcontentloaded", timeout: PAGE_TIMEOUT_MS },
@@ -740,8 +854,11 @@ class PendingCleaner {
 
     const listState = await this.waitForPendingList(page);
     if (listState === "empty") {
+      if (process.env.HR_AUTO_PENDING_DEBUG_EMPTY === "true") {
+        await this.captureDiagnostic(page, group, "scan-empty");
+      }
       replacePendingCleanupPosts(group.id, []);
-      return { count: 0 };
+      return { count: 0, read: 0 };
     }
 
     await this.scrollPendingList(page);
@@ -782,13 +899,27 @@ class PendingCleaner {
         }`,
       );
     }
-    return { count: cards.length };
+    // Facebook's own total wins when the page would not render every card; the delete
+    // pass keeps going until no Delete button is left, so it clears the rest too.
+    return { count: Math.max(cards.length, headerCount ?? 0), read: cards.length };
   }
 
-  private async waitForPendingList(
-    page: Page,
-  ): Promise<"cards" | "empty" | "unknown"> {
-    return waitForPendingList(page);
+  private async waitForPendingList(page: Page): Promise<PendingListState> {
+    const state = await waitForPendingList(page);
+    // Every further page load extends the block, so this ends the whole sweep — all
+    // tabs — rather than failing one group and moving on as it used to.
+    if (state === "rate-limited") throw new SecurityCheckpointError(rateLimitMessage);
+    if (state === "membership-pending") {
+      throw new Error(
+        "แอดมินยังไม่อนุมัติการเป็นสมาชิก · Facebook ไม่ให้ลบโพสต์ที่รอตรวจในกลุ่มนี้ (มีแค่ปุ่ม Cancel Request ซึ่งจะยกเลิกคำขอเข้ากลุ่มด้วย)",
+      );
+    }
+    if (state === "unavailable") {
+      throw new Error(
+        "เปิดกลุ่มไม่ได้ (This content isn't available) · อาจออกจากกลุ่ม ถูกนำออก หรือกลุ่มถูกลบไปแล้ว",
+      );
+    }
+    return state;
   }
 
   private async scrollPendingList(page: Page): Promise<void> {
@@ -807,15 +938,24 @@ class PendingCleaner {
         ).length;
       });
 
+    // With the sidebar's total known, keep scrolling until that many cards are on the
+    // page: one quiet round used to end the wait while Facebook was still streaming,
+    // so a group showing "Pending · 6" was recorded as 2.
+    const expected = (await readPendingHeaderCount(page).catch(() => null)) || 0;
+    const rounds = Math.max(12, Math.ceil(expected / 3) + 6);
+    const quietRoundsAllowed = expected ? 4 : 2;
     let previous = await countCards();
-    for (let round = 0; round < 12; round += 1) {
+    let quiet = 0;
+    for (let round = 0; round < rounds; round += 1) {
+      if (expected && previous >= expected) break;
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await page.waitForTimeout(1_200);
       const count = await countCards();
       // A count that is still zero means the list has not arrived yet, never that it
       // has stopped growing — treating those as equal used to end the wait after one
       // round and hand an empty page to the extractor.
-      if (count > 0 && count === previous) break;
+      quiet = count > 0 && count === previous ? quiet + 1 : 0;
+      if (quiet >= quietRoundsAllowed) break;
       previous = count;
     }
   }
@@ -824,17 +964,15 @@ class PendingCleaner {
     selected: PendingCleanupGroupRecord[],
   ): Promise<void> {
     const cleanupId = this.current.id!;
-    const page = await browserSession.newPage();
     let groupsDone = 0;
     let deleted = 0;
     let failed = 0;
     let skipped = 0;
     try {
-      for (const group of selected) {
-        if (this.stopRequested) break;
+      await this.runWithTabs(selected, async (page, group, tab) => {
         updatePendingCleanupGroup(group.id, {
           status: "deleting",
-          message: "กำลังเปิดหน้าเพื่อลบโพสต์ค้าง",
+          message: `${this.tabLabel(tab)}กำลังเปิดหน้าเพื่อลบโพสต์ค้าง`,
         });
         try {
           const result = await this.deleteGroupPending(page, group);
@@ -864,7 +1002,7 @@ class PendingCleaner {
           failedCount: failed,
           skippedCount: skipped,
         });
-      }
+      });
 
       const snapshotPath = this.writeSnapshot(cleanupId, "delete");
       this.patch({
@@ -888,7 +1026,6 @@ class PendingCleaner {
           error instanceof Error ? error.message : "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ",
       });
     } finally {
-      await page.close().catch(() => undefined);
       this.stopRequested = false;
     }
   }

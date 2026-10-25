@@ -1,12 +1,27 @@
 import http from "node:http";
+import path from "node:path";
 import { chromium } from "playwright";
-import {
+
+// Importing the cleaner opens the database, and opening it marks any sweep still in
+// progress as interrupted — so without its own data folder this test would fail the
+// real app's live run.
+process.env.HR_AUTO_DATA_DIR = path.resolve("test-results", `pending-${Date.now()}`);
+const {
   ageInDays,
   deletePendingCard,
   markPendingCards,
   parsePendingDate,
+  readPendingHeaderCount,
   waitForPendingList,
-} from "../dist/pending-cleaner.js";
+} = await import("../dist/pending-cleaner.js");
+
+// The real wait runs to the full load timeout before giving up; a few seconds show
+// whether it would have accepted the page as empty.
+const waitForPendingListBrief = (page) =>
+  Promise.race([
+    waitForPendingList(page),
+    new Promise((resolve) => setTimeout(() => resolve("still waiting"), 4_000)),
+  ]);
 
 let failures = 0;
 function check(name, condition, detail = "") {
@@ -266,6 +281,27 @@ try {
 
   const missing = await deletePendingCard(page, 99);
   check("reports a card that is no longer on the page", !missing.removed, missing.note);
+
+  console.log("Pending count from the sidebar");
+  // Row layouts copied from captures of the live "Your content" page.
+  const sidebar = (rows, main = "") =>
+    page.setContent(
+      `<body><div>${rows.map((row) => `<div>${row}</div>`).join("")}</div><main>${main}</main></body>`,
+    );
+  await sidebar(["Pending", "Published", "New content indicator", "29 posts", "Declined", "Removed"], "No posts to show");
+  check("a Published total is not read as pending", (await readPendingHeaderCount(page)) === null);
+  await sidebar(["Pending", "New content indicator", "19 posts", "Published", "1 post", "Declined", "Removed"]);
+  check("reads the count under Pending", (await readPendingHeaderCount(page)) === 19);
+  await sidebar(["Pending", "Published", "Declined", "Removed"], "<div>Pending · 6</div>");
+  check("reads the list header", (await readPendingHeaderCount(page)) === 6);
+  await sidebar(["Pending", "1 post", "Published", "Declined", "Removed"], "No posts to show");
+  check("an empty state with a pending count is not empty", (await waitForPendingListBrief(page)) !== "empty");
+  await sidebar(["Pending", "Published", "Declined", "Removed"], "No posts to show");
+  check("an empty state with no pending count is empty", (await waitForPendingList(page)) === "empty");
+  await page.setContent(
+    "<body><h2>You’re Temporarily Blocked</h2><p>It looks like you were misusing this feature by going too fast.</p></body>",
+  );
+  check("the rate-limit page is recognised", (await waitForPendingList(page)) === "rate-limited");
 
 } finally {
   await browser.close();

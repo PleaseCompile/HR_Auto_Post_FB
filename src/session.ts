@@ -317,11 +317,6 @@ class BrowserSessionManager {
     }
   }
 
-  /** True while HR Auto holds a live Chromium (false right after a crash). */
-  isOpen(): boolean {
-    return Boolean(this.context);
-  }
-
   async page(): Promise<Page> {
     const context = await this.requireContext();
     const pages = context.pages();

@@ -1,3 +1,13 @@
+function readPendingTabs() {
+  try {
+    const saved = Number(localStorage.getItem("hrauto.pendingTabs"));
+    if (Number.isInteger(saved) && saved >= 1 && saved <= 10) return saved;
+  } catch {
+    // Storage can be blocked; the default below is fine.
+  }
+  return 3;
+}
+
 const state = {
   route: "dashboard",
   dashboard: null,
@@ -10,6 +20,7 @@ const state = {
   pendingScope: "known-pending",
   pendingCustomSearch: "",
   pendingCustomSelected: new Set(),
+  pendingTabs: readPendingTabs(),
   pendingSelected: new Set(),
   pendingSelectionInitFor: null,
   pendingExpanded: new Set(),
@@ -1232,7 +1243,7 @@ function renderPendingSetup(cleanup, sessionReady) {
         : scope === "all"
           ? counts.all
           : state.pendingCustomSelected.size;
-  const minutes = Math.max(1, Math.round((scopeCount * 8) / 60));
+  const minutes = Math.max(1, Math.round((scopeCount * 8) / 60 / state.pendingTabs));
 
   return `
     <section class="panel pending-setup">
@@ -1300,13 +1311,45 @@ function renderPendingSetup(cleanup, sessionReady) {
             ? `จะเปิดตรวจ ${scopeCount.toLocaleString("th-TH")} กลุ่ม · ใช้เวลาประมาณ ${minutes} นาที`
             : "ยังไม่มีกลุ่มในขอบเขตนี้"
         }</span>
+        ${renderPendingTabsPicker(false)}
         <button class="button button-primary" data-action="start-pending-scan" ${
           sessionReady && scopeCount ? "" : "disabled"
         }>เริ่มตรวจหาโพสต์ค้าง</button>
       </div>
+      ${renderPendingTabsWarning()}
       ${sessionReady ? "" : `<p class="muted">ต้องเชื่อมต่อและล็อกอิน Facebook ก่อนจึงจะเริ่มตรวจได้</p>`}
     </section>
   `;
+}
+
+// Every tab is the same Facebook account, so more tabs mean faster requests from one
+// account. A five-tab scan of every group got the account "Temporarily Blocked", so
+// anything above three carries a warning.
+function renderPendingTabsPicker(disabled) {
+  const options = [
+    [1, "1 แท็บ (ช้าสุด ปลอดภัยสุด)"],
+    [2, "พร้อมกัน 2 แท็บ"],
+    [3, "พร้อมกัน 3 แท็บ (แนะนำ)"],
+    [5, "พร้อมกัน 5 แท็บ (เสี่ยง)"],
+    [8, "พร้อมกัน 8 แท็บ (เสี่ยงมาก)"],
+    [10, "พร้อมกัน 10 แท็บ (เสี่ยงสุด)"],
+  ];
+  return `
+    <select class="pending-tabs" data-pending-tabs aria-label="จำนวนแท็บพร้อมกัน" ${disabled ? "disabled" : ""}>
+      ${options
+        .map(
+          ([value, label]) =>
+            `<option value="${value}" ${state.pendingTabs === value ? "selected" : ""}>${label}</option>`,
+        )
+        .join("")}
+    </select>
+  `;
+}
+
+function renderPendingTabsWarning() {
+  return state.pendingTabs > 3
+    ? `<p class="pending-tabs-warning">เคยทดสอบตรวจทุกกลุ่มด้วย 5 แท็บแล้ว Facebook บล็อกชั่วคราวเพราะใช้งานเร็วเกินไป (You’re Temporarily Blocked) · ถ้าเจออีก ระบบจะหยุดทุกแท็บทันที</p>`
+    : "";
 }
 
 function renderPendingProgress(cleanup, mode) {
@@ -1318,7 +1361,9 @@ function renderPendingProgress(cleanup, mode) {
     <section class="panel pending-progress">
       <div class="panel-head">
         <div>
-          <h3>${scanning ? "กำลังตรวจหาโพสต์ค้าง" : "กำลังลบโพสต์ค้าง"}</h3>
+          <h3>${scanning ? "กำลังตรวจหาโพสต์ค้าง" : "กำลังลบโพสต์ค้าง"}${
+            cleanup.tabs > 1 ? ` · ${cleanup.tabs} แท็บพร้อมกัน` : ""
+          }</h3>
           <p class="muted">${escapeHtml(cleanup.message)}</p>
         </div>
         <button class="button button-danger" data-action="${
@@ -1481,10 +1526,12 @@ function renderPendingResults(cleanup, sessionReady) {
       </label>
       <div class="pending-actions">
         ${cleanup.snapshotPath ? `<a class="button button-ghost" href="/api/pending-cleanup/snapshot">ดาวน์โหลด JSON</a>` : ""}
+        ${renderPendingTabsPicker(deleting)}
         <button class="button button-danger" data-action="start-pending-delete" ${
           sessionReady && selectedGroups.length && !deleting ? "" : "disabled"
         }>เริ่มลบ (สูงสุด ${selectedPosts.toLocaleString("th-TH")} โพสต์)</button>
       </div>
+      ${renderPendingTabsWarning()}
     </section>
   `;
 }
@@ -1666,6 +1713,12 @@ function renderRunCard(run) {
   );
   const bulkJob =
     state.bulkMarkPosted?.runId === run.id ? state.bulkMarkPosted : null;
+  // Mirrors isUntouched in run-manager.ts: only these are ever posted again.
+  const untouchedCount = (run.targets || []).filter((target) => target.status === "queued").length;
+  const resumable =
+    ["queued", "interrupted", "stopped", "failed"].includes(run.status) &&
+    (run.mode !== "assisted" || untouchedCount > 0);
+  const freshRun = run.status === "queued" && untouchedCount === (run.targets || []).length;
   const bulkFinished = bulkJob
     ? bulkJob.targetIds.filter((targetId) => {
         const target = (run.targets || []).find((item) => item.id === targetId);
@@ -1696,6 +1749,7 @@ function renderRunCard(run) {
                     : "ทีละกลุ่ม"
             }</span>
             <span>${run.targets?.length || 0} กลุ่ม</span>
+            ${run.mode === "assisted" ? `<span>ยังไม่เคยทำ ${untouchedCount}</span>` : ""}
             <span>สร้างเมื่อ ${formatDate(run.createdAt, true)}</span>
           </div>
           ${renderRunProgress(progress)}
@@ -1706,17 +1760,18 @@ function renderRunCard(run) {
           }
         </div>
         <div class="run-actions">
-          ${["queued", "interrupted", "stopped"].includes(run.status) ? `<button class="button button-small button-primary" data-action="start-run" data-id="${run.id}">▶ เริ่มคิว</button>` : ""}
+          ${
+            resumable
+              ? `<button class="button button-small button-primary" data-action="start-run" data-id="${run.id}" data-fresh="${freshRun}" data-untouched="${untouchedCount}">▶ ${
+                  freshRun || run.mode !== "assisted"
+                    ? "เริ่มคิว"
+                    : `โพสต์ต่อเฉพาะที่ยังไม่เคยทำ (${untouchedCount})`
+                }</button>`
+              : ""
+          }
           ${run.status === "paused" ? `<button class="button button-small button-primary" data-action="resume-run" data-id="${run.id}">▶ ทำต่อ</button>` : ""}
           ${active && run.status !== "paused" ? `<button class="button button-small button-secondary" data-action="pause-run" data-id="${run.id}">⏸ พัก</button>` : ""}
           ${active ? `<button class="button button-small button-danger" data-action="stop-run" data-id="${run.id}">■ หยุด</button>` : ""}
-          ${
-            run.mode === "assisted" &&
-            ["completed", "failed"].includes(run.status) &&
-            (run.targets || []).some((target) => target.status === "failed")
-              ? `<button class="button button-small button-primary" data-action="retry-failed-run" data-id="${run.id}">ลองใหม่รายการที่ไม่สำเร็จ</button>`
-              : ""
-          }
           ${
             run.mode === "dry-run" && run.status === "completed"
               ? `<button class="button button-small button-primary" data-action="clone-assisted-run" data-id="${run.id}">สร้างคิวโพสต์จริง</button>`
@@ -1724,7 +1779,7 @@ function renderRunCard(run) {
           }
           ${
             run.mode === "assisted" &&
-            ["queued", "interrupted", "stopped"].includes(run.status) &&
+            ["queued", "interrupted", "stopped", "failed"].includes(run.status) &&
             !(state.system?.smallMemory && run.workflow !== "hybrid-windows")
               ? `<button class="button button-small button-ghost" data-action="switch-workflow" data-id="${run.id}" data-workflow="${run.workflow === "hybrid-windows" ? "hybrid-tabs" : "hybrid-windows"}">${
                   run.workflow === "hybrid-windows" ? "เปลี่ยนเป็น Hybrid" : "เปลี่ยนเป็นหลายหน้าต่าง"
@@ -1802,15 +1857,7 @@ function renderRunCard(run) {
                         <button class="button button-small button-secondary" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="mark-posted" title="คลิกปกติจะถามยืนยัน · คลิก 3 ครั้งติดกันเพื่อบันทึกทันที" ${bulkJob ? "disabled" : ""}>ฉันโพสต์เองแล้ว</button>
                         <button class="button button-small button-ghost" data-action="target-action" data-run="${run.id}" data-target="${target.id}" data-value="skip">ข้าม + หลักฐาน</button>
                         <button class="button button-small button-ghost" data-action="focus-target" data-run="${run.id}" data-target="${target.id}">เปิดแท็บ</button>
-                        ${run.workflow === "hybrid-tabs" ? `<button class="button button-small button-ghost" data-action="requeue-target" data-run="${run.id}" data-target="${target.id}" data-value="prepared" title="ปิดแท็บนี้แล้วลองกลุ่มนี้ใหม่หลังกลุ่มอื่น">↻ ไปท้ายคิว</button>` : ""}
                       `
-                      : ""
-                  }
-                  ${
-                    active &&
-                    run.workflow === "hybrid-tabs" &&
-                    ["manual_action_required", "failed"].includes(target.status)
-                      ? `<button class="button button-small button-ghost" data-action="requeue-target" data-run="${run.id}" data-target="${target.id}" data-value="checked" title="ตรวจ Facebook แล้วว่ายังไม่มีโพสต์ ให้ลองใหม่ท้ายคิว">↻ ลองใหม่ท้ายคิว</button>`
                       : ""
                   }
                   ${
@@ -2429,7 +2476,6 @@ const auditPathLabels = [
   [/^DELETE \/api\/runs\/[^/]+$/, "ลบทั้งคิว"],
   [/^POST \/api\/runs\/[^/]+\/targets\/mark-posted-bulk$/, "บันทึกโพสต์เองแล้วหลายกลุ่ม"],
   [/^POST \/api\/runs\/[^/]+\/targets\/[^/]+\/action$/, "ยืนยัน/ข้าม/โพสต์เองในกลุ่ม"],
-  [/^POST \/api\/runs\/[^/]+\/targets\/[^/]+\/requeue$/, "ย้ายกลุ่มไปท้ายคิว"],
   [/^POST \/api\/runs\/[^/]+\/targets\/[^/]+\/reconcile-posted$/, "ยืนยันว่าโพสต์เองแล้ว"],
   [/^POST \/api\/runs\/[^/]+\/targets\/[^/]+\/focus$/, "เปิดแท็บของกลุ่ม"],
   [/^POST \/api\/drafts$/, "สร้าง Draft"],
@@ -2547,6 +2593,17 @@ function bindPendingEvents() {
   document.querySelectorAll('input[name="pendingScope"]').forEach((input) => {
     input.addEventListener("change", (event) => {
       state.pendingScope = event.target.value;
+      render();
+    });
+  });
+  document.querySelectorAll("[data-pending-tabs]").forEach((select) => {
+    select.addEventListener("change", (event) => {
+      state.pendingTabs = Number(event.target.value) || 3;
+      try {
+        localStorage.setItem("hrauto.pendingTabs", String(state.pendingTabs));
+      } catch {
+        // Only a convenience; the choice still applies to this session.
+      }
       render();
     });
   });
@@ -2994,6 +3051,7 @@ async function handleAction(button, options = {}) {
           groupIds: scope === "custom" ? [...state.pendingCustomSelected] : [],
           deleteMode: "all",
           olderThanDays: 0,
+          tabs: state.pendingTabs,
         }),
       });
       state.pendingSelectionInitFor = null;
@@ -3022,7 +3080,7 @@ async function handleAction(button, options = {}) {
       );
       const posts = groups.reduce((total, group) => total + group.pendingCount, 0);
       const typed = await uiPrompt(
-        `จะลบโพสต์ค้างสูงสุด ${posts} โพสต์ ใน ${groups.length} กลุ่ม และกู้คืนไม่ได้\n\nพิมพ์คำว่า ลบ เพื่อยืนยัน`,
+        `จะลบโพสต์ค้างสูงสุด ${posts} โพสต์ ใน ${groups.length} กลุ่ม (${state.pendingTabs} แท็บพร้อมกัน) และกู้คืนไม่ได้\n\nพิมพ์คำว่า ลบ เพื่อยืนยัน`,
         "",
         { title: "ลบโพสต์ที่ค้างรออนุมัติ?", confirmText: "ลบ", tone: "danger", placeholder: "พิมพ์ ลบ" },
       );
@@ -3042,6 +3100,7 @@ async function handleAction(button, options = {}) {
           deleteMode: "all",
           olderThanDays: 0,
           acknowledged: true,
+          tabs: state.pendingTabs,
         }),
       });
       await refreshAll();
@@ -3145,7 +3204,7 @@ async function handleAction(button, options = {}) {
         );
         if (!confirmed) return;
       }
-      await api("/api/runs", {
+      const created = await api("/api/runs", {
         method: "POST",
         body: JSON.stringify({
           draftId,
@@ -3158,6 +3217,15 @@ async function handleAction(button, options = {}) {
       });
       state.selectedGroups.clear();
       await refreshAll();
+      const excluded = created?.excludedTouchedGroups || [];
+      if (excluded.length) {
+        toast(
+          `ตัด ${excluded.length} กลุ่มที่ Draft นี้เคยทำแล้วออก (${excluded.slice(0, 3).join(", ")}${
+            excluded.length > 3 ? "…" : ""
+          }) เพื่อกันโพสต์ซ้ำ`,
+          "error",
+        );
+      }
       toast(
         mode === "assisted"
           ? autoConfirm
@@ -3240,28 +3308,6 @@ async function handleAction(button, options = {}) {
       await refreshAll();
       render();
       toast("สร้างคิวโพสต์จริงจาก Dry run แล้ว กดเริ่มคิวเพื่อทำงานต่อ");
-    } else if (action === "retry-failed-run") {
-      const sourceRun = state.runs.find((run) => run.id === button.dataset.id);
-      const groupIds = (sourceRun?.targets || [])
-        .filter((target) => target.status === "failed")
-        .map((target) => target.groupId)
-        .filter(Boolean);
-      if (!sourceRun?.draftId || !groupIds.length) {
-        throw new Error("ไม่พบรายการที่ไม่สำเร็จสำหรับลองใหม่");
-      }
-      await api("/api/runs", {
-        method: "POST",
-        body: JSON.stringify({
-          draftId: sourceRun.draftId,
-          mode: "assisted",
-          workflow: "hybrid-tabs",
-          tabLimit: 10,
-          groupIds,
-        }),
-      });
-      await refreshAll();
-      render();
-      toast("สร้างคิวลองใหม่แล้ว กดเริ่มคิวเพื่อเตรียมโพสต์อีกครั้ง");
     } else if (action === "delete-run") {
       const sourceRun = state.runs.find((run) => run.id === button.dataset.id);
       if (!sourceRun) throw new Error("ไม่พบคิวที่ต้องการลบ");
@@ -3300,7 +3346,9 @@ async function handleAction(button, options = {}) {
       const sourceRun = state.runs.find((run) => run.id === button.dataset.id);
       await api(`/api/runs/${button.dataset.id}/start`, { method: "POST" });
       toast(
-        sourceRun?.workflow === "hybrid-windows"
+        button.dataset.fresh === "false" && sourceRun?.mode === "assisted"
+          ? `ทำต่อเฉพาะ ${button.dataset.untouched} กลุ่มที่ยังไม่เคยทำ · รายการที่เคยทำแล้วจะไม่ถูกโพสต์ซ้ำ`
+          : sourceRun?.workflow === "hybrid-windows"
           ? `เริ่มคิวแล้ว ระบบจะแบ่งสูงสุด ${sourceRun.tabLimit || 30} แท็บต่อหน้าต่าง และจะไม่ปิดแท็บเอง`
           : "เริ่มคิวแล้ว ระบบจะเปิดแท็บ Facebook ใหม่ตามรูปแบบของคิว",
         "info",
@@ -3455,25 +3503,6 @@ async function handleAction(button, options = {}) {
         button.dataset.value === "skip" ? "info" : "success",
       );
       window.setTimeout(pollAndRender, 1000);
-    } else if (action === "requeue-target") {
-      const prepared = button.dataset.value === "prepared";
-      const accepted = await uiConfirm(
-        prepared
-          ? "ระบบยังไม่ได้กดโพสต์ในแท็บนี้ จะปิดแท็บแล้วลองกลุ่มนี้ใหม่หลังจากกลุ่มอื่นเสร็จ ไม่มีโพสต์ซ้ำ"
-          : "ตรวจใน Facebook แล้วว่ากลุ่มนี้ยังไม่มีโพสต์ของคุณ ถ้าโพสต์ไปแล้วจะกลายเป็นโพสต์ซ้ำ",
-        {
-          title: prepared ? "ย้ายกลุ่มนี้ไปท้ายคิว?" : "ลองกลุ่มนี้ใหม่ท้ายคิว?",
-          confirmText: prepared ? "ย้ายไปท้ายคิว" : "ยังไม่ได้โพสต์ ลองใหม่",
-        },
-      );
-      if (!accepted) return;
-      await api(
-        `/api/runs/${button.dataset.run}/targets/${button.dataset.target}/requeue`,
-        { method: "POST" },
-      );
-      await refreshAll();
-      render();
-      toast("ย้ายไปท้ายคิวแล้ว ระบบจะลองใหม่หลังกลุ่มอื่น", "info");
     } else if (action === "focus-target") {
       await api(
         `/api/runs/${button.dataset.run}/targets/${button.dataset.target}/focus`,

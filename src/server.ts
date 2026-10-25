@@ -51,7 +51,7 @@ import { lastRetention, retentionSettings, startRetention } from "./retention.js
 import { runManager } from "./run-manager.js";
 import type { GroupRecord } from "./types.js";
 import { groupScanner } from "./group-scanner.js";
-import { pendingCleaner } from "./pending-cleaner.js";
+import { MAX_PENDING_TABS, pendingCleaner } from "./pending-cleaner.js";
 
 const app = express();
 const imageUpload = multer({
@@ -450,6 +450,7 @@ app.post("/api/pending-cleanup/scan/start", asyncRoute(async (request, response)
       groupIds: z.array(z.string().uuid()).max(1000).optional().default([]),
       deleteMode: z.enum(["all", "older-than"]).optional().default("all"),
       olderThanDays: z.number().int().min(0).max(365).optional().default(7),
+      tabs: z.number().int().min(1).max(MAX_PENDING_TABS).optional(),
     })
     .parse(request.body);
   assertBrowserIdle("ตรวจหาโพสต์ค้าง");
@@ -459,6 +460,7 @@ app.post("/api/pending-cleanup/scan/start", asyncRoute(async (request, response)
       groupIds: input.groupIds,
       deleteMode: input.deleteMode,
       olderThanDays: input.olderThanDays,
+      tabs: input.tabs,
     }),
   );
 }));
@@ -483,6 +485,7 @@ app.post("/api/pending-cleanup/delete/start", asyncRoute(async (request, respons
       acknowledged: z.literal(true, {
         error: "กรุณายืนยันว่าเข้าใจว่าโพสต์ที่ลบแล้วกู้คืนไม่ได้",
       }),
+      tabs: z.number().int().min(1).max(MAX_PENDING_TABS).optional(),
     })
     .parse(request.body);
   assertBrowserIdle("ลบโพสต์ค้าง");
@@ -491,6 +494,7 @@ app.post("/api/pending-cleanup/delete/start", asyncRoute(async (request, respons
       deleteMode: input.deleteMode,
       olderThanDays: input.olderThanDays,
       acknowledged: input.acknowledged,
+      tabs: input.tabs,
     }),
   );
 }));
@@ -688,11 +692,6 @@ app.post("/api/runs/:runId/targets/:targetId/action", asyncRoute(async (request,
     input.action,
     input.reason,
   );
-  response.json({ ok: true });
-}));
-
-app.post("/api/runs/:runId/targets/:targetId/requeue", asyncRoute(async (request, response) => {
-  await runManager.requeue(String(request.params.runId), String(request.params.targetId));
   response.json({ ok: true });
 }));
 

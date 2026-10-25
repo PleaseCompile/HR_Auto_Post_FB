@@ -206,5 +206,7 @@ export interface PendingCleanupState {
   message: string;
   snapshotPath: string | null;
   error: string | null;
+  /** How many tabs the current or last sweep works with; kept in memory only. */
+  tabs?: number;
   groups?: PendingCleanupGroupRecord[];
 }

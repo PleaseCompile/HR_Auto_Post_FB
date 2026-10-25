@@ -769,16 +769,15 @@ try {
       throw new Error("Dry-run conversion did not create the expected assisted queue");
     }
   });
-  await check("Runs: retry failed assisted targets", async () => {
-    clonedAssistedPayload = null;
-    await page.getByRole("button", { name: "ลองใหม่รายการที่ไม่สำเร็จ" }).click();
-    await page.getByText("สร้างคิวลองใหม่แล้ว กดเริ่มคิวเพื่อเตรียมโพสต์อีกครั้ง").waitFor();
-    if (
-      clonedAssistedPayload?.mode !== "assisted" ||
-      clonedAssistedPayload?.draftId !== seedDraft.id ||
-      clonedAssistedPayload?.groupIds?.[0] !== seedGroup.id
-    ) {
-      throw new Error("Failed-target retry did not create the expected assisted queue");
+  await check("Runs: failed targets offer no way to post again", async () => {
+    // A failed attempt may already be on Facebook, so nothing on this card may re-post it.
+    const card = page.locator(".run-card").filter({ hasText: "Composer was not ready" });
+    await card.waitFor();
+    const repost = card.getByRole("button", {
+      name: /ลองใหม่|เริ่มคิว|โพสต์ต่อเฉพาะที่ยังไม่เคยทำ/,
+    });
+    if (await repost.count()) {
+      throw new Error("A run with only failed targets still offers to post them");
     }
   });
   await check("Runs: switch interrupted queue to multiple windows", async () => {

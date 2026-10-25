@@ -2147,6 +2147,21 @@ textarea:focus {
   flex-wrap: wrap;
 }
 
+.pending-tabs {
+  width: auto;
+  min-width: 210px;
+}
+
+.pending-tabs-warning {
+  margin: 0 20px 16px;
+  padding: 10px 12px;
+  border: 1px solid #fedf89;
+  border-radius: var(--radius-sm);
+  background: var(--amber-soft);
+  color: #93370d;
+  font-size: 12px;
+}
+
 .pending-actions .muted {
   margin-right: auto;
   font-size: 12px;
