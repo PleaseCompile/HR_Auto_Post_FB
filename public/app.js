@@ -1298,6 +1298,12 @@ function renderRunCard(run) {
   );
   const bulkJob =
     state.bulkMarkPosted?.runId === run.id ? state.bulkMarkPosted : null;
+  // Mirrors isUntouched in run-manager.ts: only these are ever posted again.
+  const untouchedCount = (run.targets || []).filter((target) => target.status === "queued").length;
+  const resumable =
+    ["queued", "interrupted", "stopped", "failed"].includes(run.status) &&
+    (run.mode !== "assisted" || untouchedCount > 0);
+  const freshRun = run.status === "queued" && untouchedCount === (run.targets || []).length;
   const bulkFinished = bulkJob
     ? bulkJob.targetIds.filter((targetId) => {
         const target = (run.targets || []).find((item) => item.id === targetId);
@@ -1328,6 +1334,7 @@ function renderRunCard(run) {
           </div>
           <div class="run-meta">
             <span>${run.targets?.length || 0} กลุ่ม</span>
+            ${run.mode === "assisted" ? `<span>ยังไม่เคยทำ ${untouchedCount}</span>` : ""}
             <span>เผยแพร่ ${counts.published || 0}</span>
             <span>รออนุมัติ ${counts.pending_review || 0}</span>
             <span>รอคุณ ${counts.awaiting_confirmation || 0}</span>
@@ -1337,26 +1344,27 @@ function renderRunCard(run) {
         </div>
         <div class="run-actions">
           ${
-            run.mode === "assisted" &&
-            ["completed", "failed"].includes(run.status) &&
-            (run.targets || []).some((target) => target.status === "failed")
-              ? `<button class="button button-small button-primary" data-action="retry-failed-run" data-id="${run.id}">ลองใหม่รายการที่ไม่สำเร็จ</button>`
-              : ""
-          }
-          ${
             run.mode === "dry-run" && run.status === "completed"
               ? `<button class="button button-small button-primary" data-action="clone-assisted-run" data-id="${run.id}">สร้างคิวโพสต์จริง</button>`
               : ""
           }
           ${
             run.mode === "assisted" &&
-            ["queued", "interrupted", "stopped"].includes(run.status)
+            ["queued", "interrupted", "stopped", "failed"].includes(run.status)
               ? `<button class="button button-small button-ghost" data-action="switch-workflow" data-id="${run.id}" data-workflow="${run.workflow === "hybrid-windows" ? "hybrid-tabs" : "hybrid-windows"}">${
                   run.workflow === "hybrid-windows" ? "เปลี่ยนเป็น Hybrid" : "เปลี่ยนเป็นหลายหน้าต่าง"
                 }</button>`
               : ""
           }
-          ${["queued", "interrupted", "stopped"].includes(run.status) ? `<button class="button button-small button-primary" data-action="start-run" data-id="${run.id}">เริ่มคิว</button>` : ""}
+          ${
+            resumable
+              ? `<button class="button button-small button-primary" data-action="start-run" data-id="${run.id}" data-fresh="${freshRun}" data-untouched="${untouchedCount}">${
+                  freshRun || run.mode !== "assisted"
+                    ? "เริ่มคิว"
+                    : `โพสต์ต่อเฉพาะที่ยังไม่เคยทำ (${untouchedCount})`
+                }</button>`
+              : ""
+          }
           ${active && run.status !== "paused" ? `<button class="button button-small button-ghost" data-action="pause-run" data-id="${run.id}">พัก</button>` : ""}
           ${run.status === "paused" ? `<button class="button button-small button-primary" data-action="resume-run" data-id="${run.id}">ทำต่อ</button>` : ""}
           ${active ? `<button class="button button-small button-danger" data-action="stop-run" data-id="${run.id}">หยุด</button>` : ""}
@@ -2509,7 +2517,7 @@ async function handleAction(button, options = {}) {
         );
         if (!confirmed) return;
       }
-      await api("/api/runs", {
+      const created = await api("/api/runs", {
         method: "POST",
         body: JSON.stringify({
           draftId,
@@ -2522,6 +2530,15 @@ async function handleAction(button, options = {}) {
       });
       state.selectedGroups.clear();
       await refreshAll();
+      const excluded = created?.excludedTouchedGroups || [];
+      if (excluded.length) {
+        toast(
+          `ตัด ${excluded.length} กลุ่มที่ Draft นี้เคยทำแล้วออก (${excluded.slice(0, 3).join(", ")}${
+            excluded.length > 3 ? "…" : ""
+          }) เพื่อกันโพสต์ซ้ำ`,
+          "error",
+        );
+      }
       toast(
         mode === "assisted"
           ? autoConfirm
@@ -2602,28 +2619,6 @@ async function handleAction(button, options = {}) {
       await refreshAll();
       render();
       toast("สร้างคิวโพสต์จริงจาก Dry run แล้ว กดเริ่มคิวเพื่อทำงานต่อ");
-    } else if (action === "retry-failed-run") {
-      const sourceRun = state.runs.find((run) => run.id === button.dataset.id);
-      const groupIds = (sourceRun?.targets || [])
-        .filter((target) => target.status === "failed")
-        .map((target) => target.groupId)
-        .filter(Boolean);
-      if (!sourceRun?.draftId || !groupIds.length) {
-        throw new Error("ไม่พบรายการที่ไม่สำเร็จสำหรับลองใหม่");
-      }
-      await api("/api/runs", {
-        method: "POST",
-        body: JSON.stringify({
-          draftId: sourceRun.draftId,
-          mode: "assisted",
-          workflow: "hybrid-tabs",
-          tabLimit: 10,
-          groupIds,
-        }),
-      });
-      await refreshAll();
-      render();
-      toast("สร้างคิวลองใหม่แล้ว กดเริ่มคิวเพื่อเตรียมโพสต์อีกครั้ง");
     } else if (action === "delete-run") {
       const sourceRun = state.runs.find((run) => run.id === button.dataset.id);
       if (!sourceRun) throw new Error("ไม่พบคิวที่ต้องการลบ");
@@ -2661,7 +2656,9 @@ async function handleAction(button, options = {}) {
       const sourceRun = state.runs.find((run) => run.id === button.dataset.id);
       await api(`/api/runs/${button.dataset.id}/start`, { method: "POST" });
       toast(
-        sourceRun?.workflow === "hybrid-windows"
+        button.dataset.fresh === "false" && sourceRun?.mode === "assisted"
+          ? `ทำต่อเฉพาะ ${button.dataset.untouched} กลุ่มที่ยังไม่เคยทำ · รายการที่เคยทำแล้วจะไม่ถูกโพสต์ซ้ำ`
+          : sourceRun?.workflow === "hybrid-windows"
           ? `เริ่มคิวแล้ว ระบบจะแบ่งสูงสุด ${sourceRun.tabLimit || 30} แท็บต่อหน้าต่าง และจะไม่ปิดแท็บเอง`
           : "เริ่มคิวแล้ว ระบบจะเปิดแท็บ Facebook ใหม่ตามรูปแบบของคิว",
       );

@@ -715,34 +715,63 @@ function insertRun(input: RunCreationInput): RunRecord {
   return getRun(id)!;
 }
 
-export function createRun(input: RunCreationInput): RunRecord {
+/**
+ * Every status a real (assisted) run leaves behind once it has touched a group. Only
+ * "queued" (never started), "skipped" (the user decided with evidence) and the
+ * dry-run states are absent: a failed or timed-out attempt may already have posted.
+ */
+const TOUCHED_TARGET_STATUSES = [
+  "opening",
+  "preparing",
+  "awaiting_confirmation",
+  "submitting",
+  "published",
+  "pending_review",
+  "manual_action_required",
+  "failed",
+];
+
+export function createRun(
+  input: RunCreationInput,
+): RunRecord & { excludedTouchedGroups: string[] } {
   const uniqueGroupIds = [...new Set(input.groupIds)];
+  let excluded: Array<{ id: string; name: string }> = [];
   if (input.mode === "assisted" && uniqueGroupIds.length) {
     const placeholders = uniqueGroupIds.map(() => "?").join(", ");
-    const previous = db
+    const statuses = TOUCHED_TARGET_STATUSES.map(() => "?").join(", ");
+    excluded = db
       .prepare(
-        `SELECT DISTINCT g.name
+        `SELECT DISTINCT g.id, g.name
          FROM run_targets rt
          JOIN runs r ON r.id = rt.run_id
          JOIN groups_list g ON g.id = rt.group_id
          WHERE r.draft_id = ?
+           AND r.mode = 'assisted'
            AND rt.group_id IN (${placeholders})
-           AND rt.status IN ('published', 'pending_review', 'manual_action_required')`,
+           AND rt.status IN (${statuses})`,
       )
-      .all(input.draftId, ...uniqueGroupIds) as Array<{ name: string }>;
-    if (previous.length) {
-      const names = previous
+      .all(input.draftId, ...uniqueGroupIds, ...TOUCHED_TARGET_STATUSES) as Array<{
+      id: string;
+      name: string;
+    }>;
+    if (excluded.length === uniqueGroupIds.length) {
+      const names = excluded
         .slice(0, 3)
         .map((item) => item.name)
         .join(", ");
       throw new Error(
-        `Draft นี้อาจถูกส่งไปแล้ว ${previous.length} กลุ่ม (${names}${
-          previous.length > 3 ? "…" : ""
-        }) กรุณาใช้ “ล้างคิวเดิมทั้งหมดและสร้างใหม่” หากตรวจสอบแล้วว่าต้องเริ่มรอบใหม่`,
+        `Draft นี้เคยทำกับทุกกลุ่มที่เลือกแล้ว ${excluded.length} กลุ่ม (${names}${
+          excluded.length > 3 ? "…" : ""
+        }) · ระบบไม่โพสต์ซ้ำกลุ่มที่เคยทำ กรุณาตรวจรายการเดิมใน Facebook เอง`,
       );
     }
   }
-  return insertRun(input);
+  const skip = new Set(excluded.map((item) => item.id));
+  const run = insertRun({
+    ...input,
+    groupIds: uniqueGroupIds.filter((groupId) => !skip.has(groupId)),
+  });
+  return { ...run, excludedTouchedGroups: excluded.map((item) => item.name) };
 }
 
 export function listRuns(limit = 100): RunRecord[] {
@@ -897,8 +926,8 @@ export function updateRunWorkflow(
 ): RunRecord | null {
   const run = getRun(id);
   if (!run) return null;
-  if (!["queued", "interrupted", "stopped"].includes(run.status)) {
-    throw new Error("เปลี่ยนรูปแบบได้เฉพาะคิวที่ยังไม่เริ่ม ถูกขัดจังหวะ หรือหยุดแล้ว");
+  if (!["queued", "interrupted", "stopped", "failed"].includes(run.status)) {
+    throw new Error("เปลี่ยนรูปแบบได้เฉพาะคิวที่ยังไม่เริ่ม ถูกขัดจังหวะ หยุดแล้ว หรือหยุดเพราะข้อผิดพลาด");
   }
   db.prepare("UPDATE runs SET workflow = ?, tab_limit = ? WHERE id = ?").run(
     workflow,

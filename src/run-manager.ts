@@ -3,7 +3,9 @@ import type { Page } from "playwright";
 import { browserSession } from "./session.js";
 import {
   captureEvidence,
+  ensurePostButtonClickable,
   inspectGroup,
+  PostButtonBlockedError,
   preparePost,
   submitPreparedPost,
   SecurityCheckpointError,
@@ -54,6 +56,15 @@ interface Controller {
   acting: Set<string>;
 }
 
+/**
+ * Only a target nobody has touched yet is ever posted. Anything else — failed, timed
+ * out, closed, crashed — may already be on Facebook (a Post click that timed out can
+ * still have gone through), so it is never retried automatically; the user checks
+ * those by hand.
+ */
+const isUntouched = (target: RunTargetRecord) =>
+  target.status === "queued" && Boolean(target.group);
+
 const delay = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -89,6 +100,9 @@ function classifyAutomationError(
       code: "SECURITY_CHECKPOINT",
       message: "Facebook ต้องการให้ยืนยันตัวตน (Security Check/CAPTCHA/Checkpoint) หรือบัญชีถูกจำกัดการใช้งาน",
     };
+  }
+  if (error instanceof PostButtonBlockedError) {
+    return { code: "POST_BUTTON_BLOCKED", message: raw };
   }
   if (rendererCrashed || /\bcrash(?:ed)?\b|page crashed/i.test(raw)) {
     return {
@@ -143,8 +157,13 @@ class RunManager {
     }
     const run = getRun(runId);
     if (!run) throw new Error("ไม่พบคิวงาน");
-    if (!["queued", "interrupted", "stopped"].includes(run.status)) {
+    if (!["queued", "interrupted", "stopped", "failed"].includes(run.status)) {
       throw new Error(`ไม่สามารถเริ่มคิวที่มีสถานะ ${run.status}`);
+    }
+    if (run.mode === "assisted" && !(run.targets || []).some(isUntouched)) {
+      throw new Error(
+        "คิวนี้ไม่มีรายการที่ยังไม่เคยทำเหลือแล้ว · รายการที่เคยทำไปแล้วจะไม่ถูกโพสต์ซ้ำ กรุณาตรวจรายการสีส้ม/แดงใน Facebook เอง",
+      );
     }
     const requestedTabLimit =
       run.workflow === "hybrid-windows"
@@ -187,6 +206,8 @@ class RunManager {
   resume(runId: string): void {
     const controller = this.requireController(runId);
     controller.paused = false;
+    // The user has looked at whatever paused the run; start counting afresh.
+    controller.consecutiveAutoConfirmFailures = 0;
     updateRunStatus(
       runId,
       controller.prepared.size ? "awaiting_confirmation" : "running",
@@ -417,7 +438,7 @@ class RunManager {
       this.recordPreparationOutcome(controller, false, "RENDERER_CRASHED");
       updateTarget(targetId, "failed", {
         message:
-          "[RENDERER_CRASHED] แท็บ Chromium หยุดทำงาน รายการนี้ยังไม่ถูกโพสต์และสามารถลองใหม่ได้",
+          "[RENDERER_CRASHED] แท็บ Chromium หยุดทำงานก่อนกดโพสต์ · ระบบจะไม่ลองซ้ำเอง",
       });
     } else {
       updateTarget(targetId, "manual_action_required", {
@@ -489,6 +510,7 @@ class RunManager {
     if (!pending) throw new Error("ไม่พบโพสต์ที่เตรียมไว้สำหรับกลุ่มนี้");
     if (controller.acting.has(targetId)) throw new Error("กลุ่มนี้กำลังประมวลผลอยู่");
     controller.acting.add(targetId);
+    let submitAttempted = false;
 
     try {
       if (action === "skip") {
@@ -532,7 +554,10 @@ class RunManager {
           "ระบบเตรียมโพสต์ในแท็บนี้ไม่ครบ กรุณาจัดการใน Facebook แล้วเลือก “ฉันโพสต์เองแล้ว” หรือ “ข้าม”",
         );
       }
+      // Proven before the first real click; a failure here means nothing was sent.
+      await ensurePostButtonClickable(pending.prepared);
       updateTarget(targetId, "submitting", { message: "กำลังกดโพสต์ในแท็บนี้" });
+      submitAttempted = true;
       const result = await submitPreparedPost(pending.prepared);
       const evidencePath = await captureEvidence({
         page: pending.page,
@@ -567,7 +592,23 @@ class RunManager {
         suffix: "action-failed",
         postText: pending.draft.text,
       }).catch(() => null);
-      updateTarget(targetId, "failed", { message, evidencePath });
+      if (submitAttempted) {
+        // The Post button was already being clicked: a timeout here does not mean the
+        // post failed, so the target must not look retryable.
+        updateTarget(targetId, "manual_action_required", {
+          message: `[UNCERTAIN_SUBMIT] กดโพสต์แล้วแต่ไม่ได้รับผลยืนยัน อาจโพสต์สำเร็จแล้ว · กรุณาตรวจ Facebook · ${message}`,
+          evidencePath,
+        });
+      } else if (classified.code === "POST_BUTTON_BLOCKED") {
+        // Never clicked, so this group is still untouched as far as Facebook knows:
+        // it goes back to white and the next "post untouched" pass picks it up.
+        updateTarget(targetId, "queued", {
+          message: `${message} · ยังไม่เคยโพสต์ ทำต่อได้`,
+          evidencePath,
+        });
+      } else {
+        updateTarget(targetId, "failed", { message, evidencePath });
+      }
       if (classified.code === "SECURITY_CHECKPOINT") {
         controller.paused = true;
         updateRunStatus(runId, "paused");
@@ -576,6 +617,15 @@ class RunManager {
         if (controller.consecutiveAutoConfirmFailures >= 2) {
           controller.paused = true;
           updateRunStatus(runId, "paused");
+          // Say why on the row the user will look at; a silent pause read as the
+          // run having stopped by itself.
+          const current = getRun(runId)?.targets?.find((target) => target.id === targetId);
+          if (current) {
+            updateTarget(targetId, current.status, {
+              message: `${current.message} · พักคิวอัตโนมัติ เพราะโพสต์อัตโนมัติไม่สำเร็จติดกัน 2 ครั้ง ตรวจแล้วกด "ทำต่อ"`,
+              evidencePath,
+            });
+          }
         }
       }
     } finally {
@@ -725,26 +775,11 @@ class RunManager {
       });
       updateRunStatus(run.id, "awaiting_confirmation");
 
-      if (controller.autoConfirm && !controller.paused && !controller.stopped) {
+      if (controller.autoConfirm && !controller.stopped) {
         const minDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MIN_MS ?? 8_000);
         const maxDelay = Number(process.env.HR_AUTO_AUTO_CONFIRM_DELAY_MAX_MS ?? 150_000);
         const autoDelayMs = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-        setTimeout(() => {
-          if (
-            !controller.paused &&
-            !controller.stopped &&
-            controller.prepared.has(target.id) &&
-            !controller.acting.has(target.id)
-          ) {
-            void this.action(run.id, target.id, "confirm").catch((err) => {
-              const classified = classifyAutomationError(err);
-              if (classified.code === "SECURITY_CHECKPOINT") {
-                controller.paused = true;
-                updateRunStatus(run.id, "paused");
-              }
-            });
-          }
-        }, autoDelayMs);
+        this.scheduleAutoConfirm(run.id, controller, target.id, autoDelayMs);
       }
     } catch (error) {
       await this.recordPreparationFailure(
@@ -758,10 +793,37 @@ class RunManager {
     }
   }
 
+  /**
+   * Fires the auto-confirm for one prepared tab. A timer that came due while the run
+   * was paused used to be dropped for good, so after "ทำต่อ" those tabs sat at
+   * "รอยืนยัน" forever and the run looked stopped; now it waits out the pause.
+   */
+  private scheduleAutoConfirm(
+    runId: string,
+    controller: Controller,
+    targetId: string,
+    delayMs: number,
+  ): void {
+    setTimeout(() => {
+      if (controller.stopped || !controller.prepared.has(targetId)) return;
+      if (controller.paused || controller.acting.has(targetId)) {
+        this.scheduleAutoConfirm(runId, controller, targetId, 2_000);
+        return;
+      }
+      void this.action(runId, targetId, "confirm").catch((err) => {
+        const classified = classifyAutomationError(err);
+        if (classified.code === "SECURITY_CHECKPOINT") {
+          controller.paused = true;
+          updateRunStatus(runId, "paused");
+        }
+      });
+    }, delayMs);
+  }
+
   private async executeSequential(run: RunRecord, controller: Controller): Promise<void> {
     for (const target of run.targets || []) {
       if (controller.stopped) break;
-      if (!["queued", "failed"].includes(target.status) || !target.group) continue;
+      if (!isUntouched(target)) continue;
       await this.waitWhilePaused(controller);
       if (controller.stopped) break;
 
@@ -779,7 +841,7 @@ class RunManager {
 
   private async executeHybrid(run: RunRecord, controller: Controller): Promise<void> {
     for (const target of run.targets || []) {
-      if (!["queued", "failed"].includes(target.status) || !target.group) continue;
+      if (!isUntouched(target)) continue;
       await this.waitForCapacity(controller, target);
       if (controller.stopped) break;
       await this.prepareInNewTab(run, controller, target);
@@ -805,10 +867,7 @@ class RunManager {
     run: RunRecord,
     controller: Controller,
   ): Promise<void> {
-    const targets = (run.targets || []).filter(
-      (target) =>
-        ["queued", "failed"].includes(target.status) && Boolean(target.group),
-    );
+    const targets = (run.targets || []).filter(isUntouched);
     const tabsPerWindow = Math.min(
       MAX_HYBRID_TABS_LIMIT,
       Math.max(1, controller.tabLimit || DEFAULT_HYBRID_WINDOWS_TAB_LIMIT),
@@ -876,10 +935,15 @@ class RunManager {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ";
-      const run = getRun(runId);
-      run?.targets
-        ?.filter((target) => target.status === "queued")
-        .forEach((target) => updateTarget(target.id, "failed", { message }));
+      // Untouched targets stay "queued" so the run can carry on with exactly those;
+      // marking them failed used to hide which groups had never been tried.
+      getRun(runId)
+        ?.targets?.filter((target) => target.status === "queued")
+        .forEach((target) =>
+          updateTarget(target.id, "queued", {
+            message: `คิวหยุดก่อนถึงกลุ่มนี้ (${message}) · ยังไม่เคยโพสต์ ทำต่อได้`,
+          }),
+        );
       updateRunStatus(runId, "failed", { finish: true });
     } finally {
       this.controllers.delete(runId);
